@@ -1,0 +1,9 @@
+/ssh-cli
+/ssh-cli-init
+*.log
+*.pem
+*.csr
+*.crt
+*.cast
+recordings/
+config.json
