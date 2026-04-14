@@ -1,8 +1,10 @@
 package sshclient
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -29,6 +31,7 @@ func Connect(cfg config.Config, route string) error {
 		return fmt.Errorf("proxy.user is required")
 	}
 
+	fmt.Fprintf(os.Stderr, "\xF0\x9F\x90\xB1\nWaiting for key access\u2026\n")
 	key, _, err := keychain.EnsureKey(cfg.Key)
 	if err != nil {
 		return err
@@ -38,6 +41,11 @@ func Connect(cfg config.Config, route string) error {
 	authSigner, err := maybeWrapWithCert(baseSigner, cfg.Certificate.AuthCertPath)
 	if err != nil {
 		return err
+	}
+	if cfg.Certificate.AuthCertPath != "" {
+		fmt.Fprintf(os.Stderr, "Key and certificate loaded\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "Key loaded\n")
 	}
 
 	clientConfig := &ssh.ClientConfig{
@@ -184,7 +192,16 @@ func attachAndRun(session *ssh.Session, cfg config.Config) error {
 		if err != nil {
 			width, height = 80, 24
 		}
-		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.ICRNL:         1,
+			ssh.OPOST:         1,
+			ssh.ONLCR:         1,
+			ssh.ISIG:          1,
+			ssh.ICANON:        1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
 		if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
 			return fmt.Errorf("request pty: %w", err)
 		}
@@ -198,6 +215,13 @@ func attachAndRun(session *ssh.Session, cfg config.Config) error {
 		oldState, err := term.MakeRaw(fd)
 		if err == nil {
 			defer term.Restore(fd, oldState)
+			// In raw mode the local terminal does not translate \n → \r\n.
+			// If the remote side writes bare \n (e.g. proxy SSO prompts
+			// that bypass the PTY), lines "drift" to the right.  Wrap
+			// stdout/stderr so every \n becomes \r\n locally.
+			crlf := &crlfWriter{w: os.Stdout}
+			session.Stdout = crlf
+			session.Stderr = &crlfWriter{w: os.Stderr}
 		}
 		stopResize := watchTerminalResize(session, fd)
 		defer stopResize()
@@ -227,4 +251,27 @@ func watchTerminalResize(session *ssh.Session, fd int) func() {
 		signal.Stop(sigCh)
 		close(sigCh)
 	}
+}
+
+// crlfWriter translates bare \n into \r\n so that output from the remote
+// side renders correctly when the local terminal is in raw mode.
+type crlfWriter struct {
+	w   io.Writer
+	prev byte
+}
+
+func (c *crlfWriter) Write(p []byte) (int, error) {
+	var buf bytes.Buffer
+	for _, b := range p {
+		if b == '\n' && c.prev != '\r' {
+			buf.WriteByte('\r')
+		}
+		buf.WriteByte(b)
+		c.prev = b
+	}
+	_, err := c.w.Write(buf.Bytes())
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
