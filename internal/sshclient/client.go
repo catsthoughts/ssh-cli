@@ -260,6 +260,18 @@ func attachAndRun(session *ssh.Session, cfg config.Config) error {
 		oldState, err := term.MakeRaw(fd)
 		if err == nil {
 			defer term.Restore(fd, oldState)
+
+			// Ensure terminal is restored even if the process receives
+			// SIGINT (e.g. from the double Ctrl+C handler).
+			restoreCh := make(chan os.Signal, 1)
+			signal.Notify(restoreCh, syscall.SIGINT, syscall.SIGTERM)
+			go func() {
+				<-restoreCh
+				term.Restore(fd, oldState)
+				os.Exit(1)
+			}()
+			defer signal.Stop(restoreCh)
+
 			// In raw mode the local terminal does not translate \n → \r\n.
 			// If the remote side writes bare \n (e.g. proxy SSO prompts
 			// that bypass the PTY), lines "drift" to the right.  Wrap
