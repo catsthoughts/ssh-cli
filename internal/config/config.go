@@ -27,18 +27,46 @@ type KeyConfig struct {
 }
 
 type ProxyConfig struct {
-	Address               string `json:"address"`
-	User                  string `json:"user"`
-	KnownHosts            string `json:"known_hosts"`
-	HostKeyPolicy         string `json:"host_key_policy"`
-	InsecureIgnoreHostKey bool   `json:"insecure_ignore_hostkey"`
-	UseAgentForwarding    bool   `json:"use_agent_forwarding"`
-	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
+	Address               Addresses `json:"address"`
+	User                  string    `json:"user"`
+	KnownHosts            string    `json:"known_hosts"`
+	HostKeyPolicy         string    `json:"host_key_policy"`
+	InsecureIgnoreHostKey bool      `json:"insecure_ignore_hostkey"`
+	UseAgentForwarding    bool      `json:"use_agent_forwarding"`
+	ConnectTimeoutSeconds int       `json:"connect_timeout_seconds"`
+	BalanceMode           string    `json:"balance_mode,omitempty"`
+	RetryAttempts         int       `json:"retry_attempts,omitempty"`
+	RetryDelaySeconds     int       `json:"retry_delay_seconds,omitempty"`
+}
+
+// Addresses is a JSON type that accepts either a single string or an array of strings.
+type Addresses []string
+
+func (a *Addresses) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*a = Addresses{single}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return fmt.Errorf("address must be a string or array of strings")
+	}
+	*a = list
+	return nil
+}
+
+func (a Addresses) MarshalJSON() ([]byte, error) {
+	if len(a) == 1 {
+		return json.Marshal(a[0])
+	}
+	return json.Marshal([]string(a))
 }
 
 type TargetConfig struct {
-	Command    string `json:"command"`
-	RequestTTY bool   `json:"request_tty"`
+	Command       string `json:"command"`
+	RequestTTY    bool   `json:"request_tty"`
+	ForwardCtrlC  bool   `json:"forward_ctrl_c"`
 }
 
 type CertificateConfig struct {
@@ -64,7 +92,7 @@ func Default() Config {
 			PublicKeyPath: "./id_secure_enclave.pub",
 		},
 		Proxy: ProxyConfig{
-			Address:               "127.0.0.1:2222",
+			Address:               Addresses{"127.0.0.1:2222"},
 			User:                  currentUser,
 			KnownHosts:            "~/.ssh/known_hosts",
 			HostKeyPolicy:         "accept-new",
@@ -72,7 +100,8 @@ func Default() Config {
 			ConnectTimeoutSeconds: 10,
 		},
 		Target: TargetConfig{
-			RequestTTY: true,
+			RequestTTY:   true,
+			ForwardCtrlC: false,
 		},
 		Certificate: CertificateConfig{
 			Type:              "ssh-user",
@@ -114,13 +143,45 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// ResolvedProxies returns one entry per address in proxy.address,
+// each carrying the shared proxy settings.
+func (c Config) ResolvedProxies() []SingleProxy {
+	var out []SingleProxy
+	for _, addr := range c.Proxy.Address {
+		if strings.TrimSpace(addr) == "" {
+			continue
+		}
+		out = append(out, SingleProxy{
+			Address:               addr,
+			User:                  c.Proxy.User,
+			KnownHosts:            c.Proxy.KnownHosts,
+			HostKeyPolicy:         c.Proxy.HostKeyPolicy,
+			InsecureIgnoreHostKey: c.Proxy.InsecureIgnoreHostKey,
+			UseAgentForwarding:    c.Proxy.UseAgentForwarding,
+			ConnectTimeoutSeconds: c.Proxy.ConnectTimeoutSeconds,
+		})
+	}
+	return out
+}
+
+// SingleProxy holds a resolved proxy with a single address.
+type SingleProxy struct {
+	Address               string
+	User                  string
+	KnownHosts            string
+	HostKeyPolicy         string
+	InsecureIgnoreHostKey bool
+	UseAgentForwarding    bool
+	ConnectTimeoutSeconds int
+}
+
 func (c *Config) normalize(basePath string) {
 	c.Key.PublicKeyPath = resolvePath(basePath, c.Key.PublicKeyPath)
-	c.Proxy.KnownHosts = resolvePath(basePath, c.Proxy.KnownHosts)
 	c.Certificate.CAKeyPath = resolvePath(basePath, c.Certificate.CAKeyPath)
 	c.Certificate.OutputPath = resolvePath(basePath, c.Certificate.OutputPath)
 	c.Certificate.AuthCertPath = resolvePath(basePath, c.Certificate.AuthCertPath)
 
+	c.Proxy.KnownHosts = resolvePath(basePath, c.Proxy.KnownHosts)
 	if strings.TrimSpace(c.Proxy.User) == "" {
 		c.Proxy.User = currentUsername()
 	}
@@ -129,6 +190,29 @@ func (c *Config) normalize(basePath string) {
 	}
 	if c.Proxy.ConnectTimeoutSeconds <= 0 {
 		c.Proxy.ConnectTimeoutSeconds = 10
+	}
+
+	if strings.TrimSpace(c.Proxy.BalanceMode) == "" {
+		c.Proxy.BalanceMode = "failover"
+	}
+	if c.Proxy.RetryAttempts <= 0 {
+		c.Proxy.RetryAttempts = 1
+	}
+	if c.Proxy.RetryDelaySeconds < 0 {
+		c.Proxy.RetryDelaySeconds = 0
+	}
+}
+
+func normalizeProxy(p *ProxyConfig, basePath string) {
+	p.KnownHosts = resolvePath(basePath, p.KnownHosts)
+	if strings.TrimSpace(p.User) == "" {
+		p.User = currentUsername()
+	}
+	if strings.TrimSpace(p.HostKeyPolicy) == "" {
+		p.HostKeyPolicy = "accept-new"
+	}
+	if p.ConnectTimeoutSeconds <= 0 {
+		p.ConnectTimeoutSeconds = 10
 	}
 }
 

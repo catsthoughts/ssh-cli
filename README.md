@@ -12,18 +12,19 @@ A Go-based SSH client for macOS that uses non-exportable private keys stored in 
 ## Build
 
 ```bash
-go build ./cmd/ssh-cli
+go build -o ssh-cli ./cmd/ssh-cli
+go build -o ssh-cli-init ./cmd/ssh-cli-init
 ```
 
 ## Quick start
 
 ```bash
-go run ./cmd/ssh-cli-init init-config
+ssh-cli-init init-config
 # this creates ~/.ssh-cli/config.json
 # edit values in that file if needed
 
-go run ./cmd/ssh-cli-init create-key
-go run ./cmd/ssh-cli-init show-public-key
+ssh-cli-init create-key
+ssh-cli-init show-public-key
 ```
 
 ## Connect through ssh-proxy-server
@@ -41,13 +42,64 @@ This client keeps the proxy details in JSON and passes the final destination as 
 Then connect:
 
 ```bash
-go run ./cmd/ssh-cli
-go run ./cmd/ssh-cli target-host:22
-go run ./cmd/ssh-cli your-user@target-host:22
-go run ./cmd/ssh-cli prod-host
+ssh-cli
+ssh-cli target-host:22
+ssh-cli your-user@target-host:22
+ssh-cli prod-host
 ```
 
 Running the command without a destination logs you into the bastion from the JSON config.
+
+## Multiple proxies
+
+`proxy.address` accepts either a single string or an array of addresses. All other proxy settings are shared across them.
+
+```json
+{
+  "proxy": {
+    "address": ["proxy-1.example.com:2222", "proxy-2.example.com:2222"],
+    "balance_mode": "failover",
+    "retry_attempts": 3,
+    "retry_delay_seconds": 5
+  }
+}
+```
+
+### Balance modes
+
+| Mode | Behavior |
+|------|----------|
+| `failover` | Try proxies in config order; stop at first success (default) |
+| `round-robin` | Rotate starting proxy each invocation so load is spread across proxies |
+| `random` | Shuffle proxy order randomly each invocation |
+
+In all modes every proxy is tried before giving up. On failure the full list is retried up to `retry_attempts` times with a `retry_delay_seconds` pause between rounds.
+
+## Options
+
+### request_tty
+
+Controls whether the client requests a pseudo-terminal (PTY) on the remote side. Enabled by default. Disable it when running a single command via `target.command` and you need clean stdout without terminal processing (e.g. for pipes or scripts). Analogous to `ssh -t` / `ssh -T`.
+
+```json
+{
+  "target": {
+    "request_tty": false
+  }
+}
+```
+
+### forward_ctrl_c
+
+By default, Ctrl+C in a raw-mode session is sent directly to the remote side. Enable `forward_ctrl_c` to add a safety mechanism: the first Ctrl+C is still forwarded to the remote session, but pressing Ctrl+C a second time within 1 second will terminate the local ssh-cli process.
+
+```json
+{
+  "target": {
+    "forward_ctrl_c": true
+  }
+}
+```
 
 ## Certificate modes
 
@@ -72,7 +124,7 @@ Provide a CA private key path in the config:
 Generate it:
 
 ```bash
-go run ./cmd/ssh-cli-init create-cert
+ssh-cli-init create-cert
 ```
 
 ### X.509 CSR
@@ -94,6 +146,48 @@ go run ./cmd/ssh-cli-init create-cert
   "certificate": {
     "type": "x509-selfsigned",
     "output_path": "./client.crt",
+    "subject_common_name": "your-user"
+  }
+}
+```
+
+## Full config reference
+
+```json
+{
+  "profile": "default",
+  "key": {
+    "tag": "com.example.sshcli.default",
+    "label": "SSH CLI Default",
+    "comment": "secure-enclave@mac",
+    "secure_enclave": true,
+    "public_key_path": "./id_secure_enclave.pub"
+  },
+  "proxy": {
+    "address": ["proxy-1.example.com:2222", "proxy-2.example.com:2222"],
+    "user": "",
+    "known_hosts": "~/.ssh/known_hosts",
+    "host_key_policy": "accept-new",
+    "insecure_ignore_hostkey": false,
+    "use_agent_forwarding": true,
+    "connect_timeout_seconds": 10,
+    "balance_mode": "failover",
+    "retry_attempts": 1,
+    "retry_delay_seconds": 5
+  },
+  "target": {
+    "command": "",
+    "request_tty": true,
+    "forward_ctrl_c": false
+  },
+  "certificate": {
+    "type": "ssh-user",
+    "ca_key_path": "",
+    "output_path": "./id_secure_enclave-cert.pub",
+    "auth_cert_path": "",
+    "identity": "your-user",
+    "principals": ["your-user"],
+    "valid_for": "8h",
     "subject_common_name": "your-user"
   }
 }

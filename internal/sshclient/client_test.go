@@ -14,14 +14,12 @@ import (
 func TestBuildHostKeyCallbackAcceptsAndPersistsUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	knownHosts := filepath.Join(dir, "known_hosts")
-	cfg := config.Config{
-		Proxy: config.ProxyConfig{
-			KnownHosts:    knownHosts,
-			HostKeyPolicy: "accept-new",
-		},
+	proxy := config.SingleProxy{
+		KnownHosts:    knownHosts,
+		HostKeyPolicy: "accept-new",
 	}
 
-	cb := buildHostKeyCallback(cfg)
+	cb := buildHostKeyCallback(proxy)
 	key := mustSigner(t).PublicKey()
 	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2222}
 
@@ -29,7 +27,7 @@ func TestBuildHostKeyCallbackAcceptsAndPersistsUnknownKey(t *testing.T) {
 		t.Fatalf("expected unknown host to be accepted and persisted, got %v", err)
 	}
 
-	cb2 := buildHostKeyCallback(cfg)
+	cb2 := buildHostKeyCallback(proxy)
 	if err := cb2("127.0.0.1:2222", addr, key); err != nil {
 		t.Fatalf("expected stored host key to verify, got %v", err)
 	}

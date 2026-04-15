@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -24,11 +25,9 @@ import (
 )
 
 func Connect(cfg config.Config, route string) error {
-	if cfg.Proxy.Address == "" {
-		return fmt.Errorf("proxy.address is required")
-	}
-	if cfg.Proxy.User == "" {
-		return fmt.Errorf("proxy.user is required")
+	proxies := cfg.ResolvedProxies()
+	if len(proxies) == 0 {
+		return fmt.Errorf("at least one proxy with an address is required")
 	}
 
 	fmt.Fprintf(os.Stderr, "\xF0\x9F\x90\xB1\nWaiting for key access\u2026\n")
@@ -48,20 +47,66 @@ func Connect(cfg config.Config, route string) error {
 		fmt.Fprintf(os.Stderr, "Key loaded\n")
 	}
 
-	clientConfig := &ssh.ClientConfig{
-		User:            cfg.Proxy.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(authSigner)},
-		HostKeyCallback: buildHostKeyCallback(cfg),
-		Timeout:         time.Duration(cfg.Proxy.ConnectTimeoutSeconds) * time.Second,
+	ordered := orderProxies(proxies, cfg.Proxy.BalanceMode)
+	var lastErr error
+	for attempt := 1; attempt <= cfg.Proxy.RetryAttempts; attempt++ {
+		if attempt > 1 {
+			fmt.Fprintf(os.Stderr, "Retry %d/%d in %ds\u2026\n", attempt, cfg.Proxy.RetryAttempts, cfg.Proxy.RetryDelaySeconds)
+			time.Sleep(time.Duration(cfg.Proxy.RetryDelaySeconds) * time.Second)
+		}
+		for _, p := range ordered {
+			fmt.Fprintf(os.Stderr, "Connecting to %s\u2026\n", p.Address)
+			lastErr = connectViaProxy(cfg, p, authSigner, route)
+			if lastErr == nil {
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "Proxy %s failed: %v\n", p.Address, lastErr)
+		}
+	}
+	return fmt.Errorf("all proxies failed: %w", lastErr)
+}
+
+func orderProxies(proxies []config.SingleProxy, mode string) []config.SingleProxy {
+	out := make([]config.SingleProxy, len(proxies))
+	copy(out, proxies)
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "round-robin":
+		if len(out) > 1 {
+			offset := int(time.Now().UnixNano()/int64(time.Millisecond)) % len(out)
+			rotated := make([]config.SingleProxy, len(out))
+			for i := range out {
+				rotated[i] = out[(i+offset)%len(out)]
+			}
+			return rotated
+		}
+	case "random":
+		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	}
+	return out
+}
+
+func connectViaProxy(cfg config.Config, proxy config.SingleProxy, authSigner ssh.Signer, route string) error {
+	if proxy.Address == "" {
+		return fmt.Errorf("proxy.address is required")
+	}
+	if proxy.User == "" {
+		return fmt.Errorf("proxy.user is required")
 	}
 
-	conn, err := ssh.Dial("tcp", cfg.Proxy.Address, clientConfig)
+	clientConfig := &ssh.ClientConfig{
+		User:            proxy.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(authSigner)},
+		HostKeyCallback: buildHostKeyCallback(proxy),
+		Timeout:         time.Duration(proxy.ConnectTimeoutSeconds) * time.Second,
+	}
+
+	conn, err := ssh.Dial("tcp", proxy.Address, clientConfig)
 	if err != nil {
-		return fmt.Errorf("connect to proxy %s: %w", cfg.Proxy.Address, err)
+		return fmt.Errorf("connect to proxy %s: %w", proxy.Address, err)
 	}
 	defer conn.Close()
 
-	if cfg.Proxy.UseAgentForwarding {
+	if proxy.UseAgentForwarding {
 		forwardedAgent := agentutil.NewReadOnlyAgent(cfg.Key.Comment, authSigner)
 		if err := agent.ForwardToAgent(conn, forwardedAgent); err != nil {
 			return fmt.Errorf("forward agent: %w", err)
@@ -74,7 +119,7 @@ func Connect(cfg config.Config, route string) error {
 	}
 	defer session.Close()
 
-	if cfg.Proxy.UseAgentForwarding {
+	if proxy.UseAgentForwarding {
 		if err := agent.RequestAgentForwarding(session); err != nil {
 			return fmt.Errorf("request agent forwarding: %w", err)
 		}
@@ -107,12 +152,12 @@ func maybeWrapWithCert(base ssh.Signer, path string) (ssh.Signer, error) {
 	return ssh.NewCertSigner(cert, base)
 }
 
-func buildHostKeyCallback(cfg config.Config) ssh.HostKeyCallback {
-	policy := strings.ToLower(strings.TrimSpace(cfg.Proxy.HostKeyPolicy))
-	if cfg.Proxy.InsecureIgnoreHostKey || policy == "insecure" || policy == "no" {
+func buildHostKeyCallback(proxy config.SingleProxy) ssh.HostKeyCallback {
+	policy := strings.ToLower(strings.TrimSpace(proxy.HostKeyPolicy))
+	if proxy.InsecureIgnoreHostKey || policy == "insecure" || policy == "no" {
 		return ssh.InsecureIgnoreHostKey()
 	}
-	if cfg.Proxy.KnownHosts == "" {
+	if proxy.KnownHosts == "" {
 		return ssh.InsecureIgnoreHostKey()
 	}
 	if policy == "" {
@@ -120,7 +165,7 @@ func buildHostKeyCallback(cfg config.Config) ssh.HostKeyCallback {
 	}
 
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		cb, err := knownhosts.New(cfg.Proxy.KnownHosts)
+		cb, err := knownhosts.New(proxy.KnownHosts)
 		if err == nil {
 			verifyErr := cb(hostname, remote, key)
 			if verifyErr == nil {
@@ -128,7 +173,7 @@ func buildHostKeyCallback(cfg config.Config) ssh.HostKeyCallback {
 			}
 			var keyErr *knownhosts.KeyError
 			if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
-				if err := appendKnownHost(cfg.Proxy.KnownHosts, hostname, remote, key); err != nil {
+				if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 					return fmt.Errorf("persist known host: %w", err)
 				}
 				return nil
@@ -136,12 +181,12 @@ func buildHostKeyCallback(cfg config.Config) ssh.HostKeyCallback {
 			return verifyErr
 		}
 		if policy == "accept-new" && os.IsNotExist(err) {
-			if err := appendKnownHost(cfg.Proxy.KnownHosts, hostname, remote, key); err != nil {
+			if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 				return fmt.Errorf("persist known host: %w", err)
 			}
 			return nil
 		}
-		return fmt.Errorf("load known_hosts %s: %w", cfg.Proxy.KnownHosts, err)
+		return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, err)
 	}
 }
 
@@ -223,6 +268,12 @@ func attachAndRun(session *ssh.Session, cfg config.Config) error {
 			session.Stdout = crlf
 			session.Stderr = &crlfWriter{w: os.Stderr}
 		}
+		if cfg.Target.ForwardCtrlC {
+			session.Stdin = &ctrlCInterceptor{
+				r:      os.Stdin,
+				stderr: &crlfWriter{w: os.Stderr},
+			}
+		}
 		stopResize := watchTerminalResize(session, fd)
 		defer stopResize()
 	}
@@ -251,6 +302,34 @@ func watchTerminalResize(session *ssh.Session, fd int) func() {
 		signal.Stop(sigCh)
 		close(sigCh)
 	}
+}
+
+// ctrlCInterceptor wraps stdin and intercepts 0x03 (Ctrl+C) bytes.
+// First Ctrl+C is forwarded to the remote session as-is.
+// Two Ctrl+C presses within 1 second terminate the local process.
+type ctrlCInterceptor struct {
+	r         io.Reader
+	stderr    io.Writer
+	lastPress time.Time
+}
+
+func (c *ctrlCInterceptor) Read(dst []byte) (int, error) {
+	n, err := c.r.Read(dst)
+	if n > 0 && err == nil {
+		for i := 0; i < n; i++ {
+			if dst[i] == 0x03 {
+				now := time.Now()
+				if now.Sub(c.lastPress) < 1*time.Second {
+					fmt.Fprintf(c.stderr, "\r\nDouble Ctrl+C — exiting\r\n")
+					syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+					return 0, io.EOF
+				}
+				c.lastPress = now
+				fmt.Fprintf(c.stderr, "\r\n[Ctrl+C sent to remote — press again within 1s to exit]\r\n")
+			}
+		}
+	}
+	return n, err
 }
 
 // crlfWriter translates bare \n into \r\n so that output from the remote

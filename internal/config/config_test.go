@@ -29,8 +29,8 @@ func TestLoadWithoutSendEnvStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Proxy.Address != "127.0.0.1:2222" {
-		t.Fatalf("unexpected proxy address: %q", cfg.Proxy.Address)
+	if len(cfg.Proxy.Address) != 1 || cfg.Proxy.Address[0] != "127.0.0.1:2222" {
+		t.Fatalf("unexpected proxy address: %v", cfg.Proxy.Address)
 	}
 }
 
