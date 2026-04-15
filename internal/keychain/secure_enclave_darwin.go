@@ -356,6 +356,10 @@ func (k *Key) IsSecureEnclave() bool {
 	return k.cfg.SecureEnclave
 }
 
+func (k *Key) IsHardwareBacked() bool {
+	return true
+}
+
 func (k *Key) SSHPublicKey() ssh.PublicKey {
 	return k.sshPub
 }

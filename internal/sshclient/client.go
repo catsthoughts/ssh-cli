@@ -16,7 +16,7 @@ import (
 
 	agentutil "ssh-cli/internal/agent"
 	"ssh-cli/internal/config"
-	"ssh-cli/internal/keychain"
+	"ssh-cli/internal/keystore"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -31,7 +31,7 @@ func Connect(cfg config.Config, route string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "\xF0\x9F\x90\xB1\nWaiting for key access\u2026\n")
-	key, _, err := keychain.EnsureKey(cfg.Key)
+	key, _, err := keystore.EnsureKey(cfg.Key)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package certutil
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -13,10 +14,15 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"ssh-cli/internal/config"
-	"ssh-cli/internal/keychain"
 )
 
-func CreateSSHUserCertificate(cfg config.Config, key *keychain.Key) (string, error) {
+// Signer is the subset of keystore.Key needed by certificate operations.
+type Signer interface {
+	crypto.Signer
+	SSHPublicKey() ssh.PublicKey
+}
+
+func CreateSSHUserCertificate(cfg config.Config, key Signer) (string, error) {
 	if cfg.Certificate.CAKeyPath == "" {
 		return "", fmt.Errorf("certificate.ca_key_path is required for ssh-user certificates")
 	}
@@ -76,7 +82,7 @@ func CreateSSHUserCertificate(cfg config.Config, key *keychain.Key) (string, err
 	return path, nil
 }
 
-func CreateCSR(cfg config.Config, key *keychain.Key) (string, error) {
+func CreateCSR(cfg config.Config, key Signer) (string, error) {
 	name := cfg.Certificate.SubjectCommonName
 	if name == "" {
 		name = cfg.Proxy.User
@@ -102,7 +108,7 @@ func CreateCSR(cfg config.Config, key *keychain.Key) (string, error) {
 	return path, nil
 }
 
-func CreateSelfSignedX509(cfg config.Config, key *keychain.Key) (string, string, error) {
+func CreateSelfSignedX509(cfg config.Config, key Signer) (string, string, error) {
 	name := cfg.Certificate.SubjectCommonName
 	if name == "" {
 		name = cfg.Proxy.User

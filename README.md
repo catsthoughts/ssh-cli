@@ -1,8 +1,9 @@
-# SSH CLI for macOS Secure Enclave
+# SSH CLI — Cross-Platform SSH Client with Hardware-Backed Keys
 
-A Go-based SSH client for macOS that uses non-exportable private keys stored in the Keychain or Secure Enclave. It is designed to integrate well with [catsthoughts/ssh-proxy-server](https://github.com/catsthoughts/ssh-proxy-server) and is recommended when you want to use agent-based authentication with that project. It can:
+A Go-based SSH client that uses non-exportable private keys stored in platform-specific hardware security modules. It is designed to integrate well with [catsthoughts/ssh-proxy-server](https://github.com/catsthoughts/ssh-proxy-server) and is recommended when you want to use agent-based authentication with that project. It can:
 
-- create a non-exportable client key in the Secure Enclave or macOS Keychain
+- create a non-exportable client key in the Secure Enclave (macOS), TPM 2.0 (Linux), or CNG/Platform Crypto Provider (Windows)
+- fall back to a software ECDSA P-256 key when no hardware module is available
 - print the SSH public key for enrollment on a proxy or target host
 - create an SSH user certificate signed by an existing CA key
 - create an X.509 CSR or self-signed X.509 certificate
@@ -151,6 +152,26 @@ ssh-cli-init create-cert
 }
 ```
 
+## Key backends
+
+The `key.backend` field controls which key storage is used. Set to `"auto"` (default) for automatic platform detection.
+
+| Backend | Platform | Storage |
+|---------|----------|---------|
+| `auto` | any | Automatic: Secure Enclave on macOS, TPM on Linux (if `/dev/tpmrm0` exists), CNG on Windows, file fallback otherwise |
+| `secure-enclave` | macOS | Secure Enclave / Keychain (ECDSA P-256, non-exportable) |
+| `tpm` | Linux | TPM 2.0 via `/dev/tpmrm0` (ECDSA P-256, persistent handle) |
+| `cng` | Windows | CNG Platform Crypto Provider or Software KSP (ECDSA P-256) |
+| `file` | any | Software ECDSA P-256 key stored as PEM in `~/.ssh-cli/keys/` |
+
+```json
+{
+  "key": {
+    "backend": "auto"
+  }
+}
+```
+
 ## Full config reference
 
 ```json
@@ -161,7 +182,8 @@ ssh-cli-init create-cert
     "label": "SSH CLI Default",
     "comment": "secure-enclave@mac",
     "secure_enclave": true,
-    "public_key_path": "./id_secure_enclave.pub"
+    "public_key_path": "./id_secure_enclave.pub",
+    "backend": "auto"
   },
   "proxy": {
     "address": ["proxy-1.example.com:2222", "proxy-2.example.com:2222"],
@@ -195,7 +217,8 @@ ssh-cli-init create-cert
 
 ## Notes
 
-- Secure Enclave keys are ECDSA P-256 on macOS.
-- The private key never leaves Keychain / Secure Enclave.
-- If Secure Enclave storage is blocked by the local CLI environment, the client automatically falls back to a non-exportable key stored in the macOS Keychain.
-- This repository is intended for macOS. Non-darwin builds return a clear error.
+- All key backends use ECDSA P-256.
+- On macOS, the private key never leaves Keychain / Secure Enclave. If Secure Enclave storage is blocked by the local CLI environment, the client automatically falls back to a non-exportable key stored in the macOS Keychain.
+- On Linux, the key is stored as a persistent object in the TPM 2.0. Requires access to `/dev/tpmrm0`.
+- On Windows, the key is stored via CNG. The Platform Crypto Provider (TPM-backed) is tried first; if unavailable, the Software KSP is used.
+- The `file` backend stores a PEM-encoded private key on disk — use only when no hardware module is available.

@@ -24,6 +24,7 @@ type KeyConfig struct {
 	Comment       string `json:"comment"`
 	SecureEnclave bool   `json:"secure_enclave"`
 	PublicKeyPath string `json:"public_key_path"`
+	Backend       string `json:"backend,omitempty"`
 }
 
 type ProxyConfig struct {

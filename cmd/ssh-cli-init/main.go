@@ -9,7 +9,7 @@ import (
 
 	"ssh-cli/internal/certutil"
 	"ssh-cli/internal/config"
-	"ssh-cli/internal/keychain"
+	"ssh-cli/internal/keystore"
 )
 
 func main() {
@@ -66,12 +66,12 @@ func runCreateKey(args []string) error {
 		return err
 	}
 
-	key, created, err := keychain.EnsureKey(cfg.Key)
+	key, created, err := keystore.EnsureKey(cfg.Key)
 	if err != nil {
 		return err
 	}
 	defer key.Close()
-	if err := keychain.WriteAuthorizedKeyFile(cfg.Key.PublicKeyPath, key.AuthorizedKey()); err != nil {
+	if err := keystore.WriteAuthorizedKeyFile(cfg.Key.PublicKeyPath, key.AuthorizedKey()); err != nil {
 		return err
 	}
 
@@ -79,9 +79,9 @@ func runCreateKey(args []string) error {
 	if created {
 		state = "created"
 	}
-	storage := "macOS Keychain"
-	if key.IsSecureEnclave() {
-		storage = "Secure Enclave"
+	storage := "software"
+	if key.IsHardwareBacked() {
+		storage = "hardware-backed"
 	}
 	fmt.Printf("%s non-exportable key in %s: %s\n", state, storage, cfg.Key.Tag)
 	fmt.Printf("public key saved to %s\n", cfg.Key.PublicKeyPath)
@@ -95,7 +95,7 @@ func runShowPublicKey(args []string) error {
 	if err != nil {
 		return err
 	}
-	key, _, err := keychain.EnsureKey(cfg.Key)
+	key, _, err := keystore.EnsureKey(cfg.Key)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func runCreateCert(args []string) error {
 	if err != nil {
 		return err
 	}
-	key, _, err := keychain.EnsureKey(cfg.Key)
+	key, _, err := keystore.EnsureKey(cfg.Key)
 	if err != nil {
 		return err
 	}

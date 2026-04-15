@@ -5,7 +5,8 @@
     "label": "SSH CLI Default",
     "comment": "secure-enclave@mac",
     "secure_enclave": true,
-    "public_key_path": "./id_secure_enclave.pub"
+    "public_key_path": "./id_secure_enclave.pub",
+    "backend": "auto"
   },
   "proxy": {
     "address": ["proxy-1.example.com:2222", "proxy-2.example.com:2222"],
