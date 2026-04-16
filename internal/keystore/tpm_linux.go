@@ -32,6 +32,7 @@ type tpmKey struct {
 	pub      *ecdsa.PublicKey
 	sshPub   ssh.PublicKey
 	handle   tpm2.TPMHandle
+	name     tpm2.TPM2BName
 	comment  string
 }
 
@@ -49,21 +50,21 @@ func ensureKeyTPM(cfg config.KeyConfig) (Key, bool, error) {
 	handle := tagToHandle(cfg.Tag)
 
 	// Try to read the existing key.
-	pub, err := readPublicKey(t, handle)
+	pub, name, err := readPublicKey(t, handle)
 	if err == nil && pub != nil {
-		return finishTPMKey(cfg, pub, handle, false)
+		return finishTPMKey(cfg, pub, handle, name, false)
 	}
 
 	// Create a new primary key under the owner hierarchy, then
 	// persist it at the chosen handle.
-	pub, err = createAndPersistKey(t, handle)
+	pub, name, err = createAndPersistKey(t, handle)
 	if err != nil {
 		return nil, false, fmt.Errorf("create TPM key: %w", err)
 	}
-	return finishTPMKey(cfg, pub, handle, true)
+	return finishTPMKey(cfg, pub, handle, name, true)
 }
 
-func finishTPMKey(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHandle, created bool) (Key, bool, error) {
+func finishTPMKey(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHandle, name tpm2.TPM2BName, created bool) (Key, bool, error) {
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
 		return nil, false, fmt.Errorf("convert TPM public key to SSH: %w", err)
@@ -73,6 +74,7 @@ func finishTPMKey(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHan
 		pub:     pub,
 		sshPub:  sshPub,
 		handle:  handle,
+		name:    name,
 		comment: cfg.Comment,
 	}
 	return k, created, nil
@@ -90,17 +92,21 @@ func openTPM() (transport.TPMCloser, error) {
 	return linuxtpm.Open(tpmDevicePath)
 }
 
-func readPublicKey(t transport.TPM, handle tpm2.TPMHandle) (*ecdsa.PublicKey, error) {
+func readPublicKey(t transport.TPM, handle tpm2.TPMHandle) (*ecdsa.PublicKey, tpm2.TPM2BName, error) {
 	resp, err := tpm2.ReadPublic{
 		ObjectHandle: tpm2.NamedHandle{Handle: handle},
 	}.Execute(t)
 	if err != nil {
-		return nil, err
+		return nil, tpm2.TPM2BName{}, err
 	}
-	return extractECCPublicKey(resp.OutPublic)
+	pub, err := extractECCPublicKey(resp.OutPublic)
+	if err != nil {
+		return nil, tpm2.TPM2BName{}, err
+	}
+	return pub, resp.Name, nil
 }
 
-func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.PublicKey, error) {
+func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.PublicKey, tpm2.TPM2BName, error) {
 	// Create a primary ECC P-256 signing key under the owner hierarchy.
 	createResp, err := tpm2.CreatePrimary{
 		PrimaryHandle: tpm2.AuthHandle{
@@ -129,7 +135,7 @@ func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.
 		}),
 	}.Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("CreatePrimary: %w", err)
+		return nil, tpm2.TPM2BName{}, fmt.Errorf("CreatePrimary: %w", err)
 	}
 	defer tpm2.FlushContext{FlushHandle: createResp.ObjectHandle}.Execute(t)
 
@@ -149,10 +155,19 @@ func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.
 		PersistentHandle: persistHandle,
 	}.Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("EvictControl: %w", err)
+		return nil, tpm2.TPM2BName{}, fmt.Errorf("EvictControl: %w", err)
 	}
 
-	return extractECCPublicKey(createResp.OutPublic)
+	pub, err := extractECCPublicKey(createResp.OutPublic)
+	if err != nil {
+		return nil, tpm2.TPM2BName{}, err
+	}
+	// Read the persistent object's name (differs from the transient name).
+	_, persistName, err := readPublicKey(t, persistHandle)
+	if err != nil {
+		return nil, tpm2.TPM2BName{}, fmt.Errorf("read persisted key name: %w", err)
+	}
+	return pub, persistName, nil
 }
 
 func evictKey(t transport.TPM, handle tpm2.TPMHandle) error {
@@ -209,6 +224,7 @@ func (k *tpmKey) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 	resp, err := tpm2.Sign{
 		KeyHandle: tpm2.AuthHandle{
 			Handle: k.handle,
+			Name:   k.name,
 			Auth:   tpm2.PasswordAuth(nil),
 		},
 		Digest: tpm2.TPM2BDigest{Buffer: digest},
