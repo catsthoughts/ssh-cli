@@ -1,3 +1,10 @@
+// promptTPMPin always asks the user for a PIN for TPM operations
+func promptTPMPin() string {
+	fmt.Print("Введите PIN для TPM-ключа: ")
+	r := bufio.NewReader(os.Stdin)
+	pin, _ := r.ReadString('\n')
+	return strings.TrimSpace(pin)
+}
 //go:build linux
 
 package keystore
@@ -49,22 +56,24 @@ func ensureKeyTPM(cfg config.KeyConfig) (Key, bool, error) {
 
 	handle := tagToHandle(cfg.Tag)
 
+	pin := promptTPMPin()
+
 	// Try to read the existing key.
 	pub, name, err := readPublicKey(t, handle)
 	if err == nil && pub != nil {
-		return finishTPMKey(cfg, pub, handle, name, false)
+		return finishTPMKeyWithPin(cfg, pub, handle, name, pin, false)
 	}
 
 	// Create a new primary key under the owner hierarchy, then
 	// persist it at the chosen handle.
-	pub, name, err = createAndPersistKey(t, handle)
+	pub, name, err = createAndPersistKey(t, handle, pin)
 	if err != nil {
 		return nil, false, fmt.Errorf("create TPM key: %w", err)
 	}
-	return finishTPMKey(cfg, pub, handle, name, true)
+	return finishTPMKeyWithPin(cfg, pub, handle, name, pin, true)
 }
 
-func finishTPMKey(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHandle, name tpm2.TPM2BName, created bool) (Key, bool, error) {
+func finishTPMKeyWithPin(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHandle, name tpm2.TPM2BName, pin string, created bool) (Key, bool, error) {
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
 		return nil, false, fmt.Errorf("convert TPM public key to SSH: %w", err)
@@ -77,6 +86,8 @@ func finishTPMKey(cfg config.KeyConfig, pub *ecdsa.PublicKey, handle tpm2.TPMHan
 		name:    name,
 		comment: cfg.Comment,
 	}
+	// Store PIN in comment field for use in Sign (or add a new field if needed)
+	k.comment = pin
 	return k, created, nil
 }
 
@@ -106,12 +117,12 @@ func readPublicKey(t transport.TPM, handle tpm2.TPMHandle) (*ecdsa.PublicKey, tp
 	return pub, resp.Name, nil
 }
 
-func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.PublicKey, tpm2.TPM2BName, error) {
+func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle, pin string) (*ecdsa.PublicKey, tpm2.TPM2BName, error) {
 	// Create a primary ECC P-256 signing key under the owner hierarchy.
 	createResp, err := tpm2.CreatePrimary{
 		PrimaryHandle: tpm2.AuthHandle{
 			Handle: tpm2.TPMRHOwner,
-			Auth:   tpm2.PasswordAuth(nil),
+			Auth:   tpm2.PasswordAuth([]byte(pin)),
 		},
 		InPublic: tpm2.New2B(tpm2.TPMTPublic{
 			Type:    tpm2.TPMAlgECC,
@@ -146,7 +157,7 @@ func createAndPersistKey(t transport.TPM, persistHandle tpm2.TPMHandle) (*ecdsa.
 	_, err = tpm2.EvictControl{
 		Auth: tpm2.AuthHandle{
 			Handle: tpm2.TPMRHOwner,
-			Auth:   tpm2.PasswordAuth(nil),
+			Auth:   tpm2.PasswordAuth([]byte(pin)),
 		},
 		ObjectHandle: &tpm2.NamedHandle{
 			Handle: createResp.ObjectHandle,
@@ -221,11 +232,13 @@ func (k *tpmKey) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 	}
 	defer t.Close()
 
+	pin := promptTPMPin()
+
 	resp, err := tpm2.Sign{
 		KeyHandle: tpm2.AuthHandle{
 			Handle: k.handle,
 			Name:   k.name,
-			Auth:   tpm2.PasswordAuth(nil),
+			Auth:   tpm2.PasswordAuth([]byte(pin)),
 		},
 		Digest: tpm2.TPM2BDigest{Buffer: digest},
 		InScheme: tpm2.TPMTSigScheme{
