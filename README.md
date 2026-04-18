@@ -108,6 +108,15 @@ The legacy boolean `"secure_enclave": true` is still accepted for backward compa
 
 ### YubiKey PIV
 
+YubiKey PIV has 4 slots suitable for SSH authentication:
+
+| Slot | Common use |
+|------|------------|
+| `9a` | PIV Authentication (default) |
+| `9c` | Digital Signature |
+| `9d` | Key Management |
+| `9e` | Card Authentication |
+
 ```json
 {
   "key": {
