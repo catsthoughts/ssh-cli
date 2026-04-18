@@ -108,7 +108,7 @@ The legacy boolean `"secure_enclave": true` is still accepted for backward compa
 
 ### YubiKey PIV
 
-YubiKey PIV has 4 slots suitable for SSH authentication:
+The PIV standard defines 24 slots (00–95 hex). ssh-cli supports 4 slots for SSH authentication:
 
 | Slot | Common use |
 |------|------------|
