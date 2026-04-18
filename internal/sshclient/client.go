@@ -24,11 +24,6 @@ import (
 )
 
 func Connect(cfg config.Config, route string) error {
-	proxies := cfg.ResolvedProxies()
-	if len(proxies) == 0 {
-		return fmt.Errorf("at least one proxy with an address is required")
-	}
-
 	fmt.Fprintf(os.Stderr, "\xF0\x9F\x90\xB1\nWaiting for key access\u2026\n")
 	key, _, err := keychain.EnsureKey(cfg.Key)
 	if err != nil {
@@ -44,6 +39,15 @@ func Connect(cfg config.Config, route string) error {
 		fmt.Fprintf(os.Stderr, "Key and certificate loaded\n")
 	} else {
 		fmt.Fprintf(os.Stderr, "Key loaded\n")
+	}
+
+	if !cfg.Proxy.UseProxy {
+		return connectDirect(cfg, authSigner, route)
+	}
+
+	proxies := cfg.ResolvedProxies()
+	if len(proxies) == 0 {
+		return fmt.Errorf("at least one proxy with an address is required")
 	}
 
 	ordered := orderProxies(proxies, cfg.Proxy.BalanceMode)
@@ -130,6 +134,99 @@ func connectViaProxy(cfg config.Config, proxy config.SingleProxy, authSigner ssh
 	}
 
 	return attachAndRun(session, cfg)
+}
+
+func connectDirect(cfg config.Config, authSigner ssh.Signer, route string) error {
+	if route == "" {
+		return fmt.Errorf("destination is required for direct connection")
+	}
+
+	user, host, port := splitDestination(route)
+	if host == "" {
+		return fmt.Errorf("invalid destination %q", route)
+	}
+	if port == "" {
+		port = "22"
+	}
+	if user == "" {
+		user = cfg.Proxy.User
+	}
+
+	address := net.JoinHostPort(host, port)
+	fmt.Fprintf(os.Stderr, "Connecting directly to %s\u2026\n", address)
+
+	clientConfig := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(authSigner)},
+		HostKeyCallback: buildDirectHostKeyCallback(cfg.Proxy),
+		Timeout:         time.Duration(cfg.Proxy.ConnectTimeoutSeconds) * time.Second,
+	}
+
+	conn, err := ssh.Dial("tcp", address, clientConfig)
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", address, err)
+	}
+	defer conn.Close()
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return fmt.Errorf("open session: %w", err)
+	}
+	defer session.Close()
+
+	return attachAndRun(session, cfg)
+}
+
+func splitDestination(destination string) (user, host, port string) {
+	if at := strings.Index(destination, "@"); at >= 0 {
+		user = destination[:at]
+		destination = destination[at+1:]
+	}
+	if colon := strings.LastIndex(destination, ":"); colon >= 0 && !strings.Contains(destination[colon+1:], "/") {
+		host = destination[:colon]
+		port = destination[colon+1:]
+	} else {
+		host = destination
+	}
+	return strings.TrimSpace(user), strings.TrimSpace(host), strings.TrimSpace(port)
+}
+
+func buildDirectHostKeyCallback(proxy config.ProxyConfig) ssh.HostKeyCallback {
+	policy := strings.ToLower(strings.TrimSpace(proxy.HostKeyPolicy))
+	if proxy.InsecureIgnoreHostKey || policy == "insecure" || policy == "no" {
+		return ssh.InsecureIgnoreHostKey()
+	}
+	if proxy.KnownHosts == "" {
+		return ssh.InsecureIgnoreHostKey()
+	}
+	if policy == "" {
+		policy = "accept-new"
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		cb, err := knownhosts.New(proxy.KnownHosts)
+		if err == nil {
+			verifyErr := cb(hostname, remote, key)
+			if verifyErr == nil {
+				return nil
+			}
+			var keyErr *knownhosts.KeyError
+			if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
+				if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
+					return fmt.Errorf("persist known host: %w", err)
+				}
+				return nil
+			}
+			return verifyErr
+		}
+		if policy == "accept-new" && os.IsNotExist(err) {
+			if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
+				return fmt.Errorf("persist known host: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, err)
+	}
 }
 
 func maybeWrapWithCert(base ssh.Signer, path string) (ssh.Signer, error) {

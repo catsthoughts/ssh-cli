@@ -252,6 +252,40 @@ func runViaProxy(t *testing.T, env testEnv, cfg config.Config, signer ssh.Signer
 	return lastLine(stdoutBuf.String())
 }
 
+// runDirect connects directly to the target (no proxy) with the given signer and executes cmd.
+func runDirect(t *testing.T, env testEnv, signer ssh.Signer, cmd string) string {
+	t.Helper()
+
+	cfg := &ssh.ClientConfig{
+		User:            env.TargetUser,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // e2e only
+		Timeout:         30 * time.Second,
+	}
+
+	conn, err := ssh.Dial("tcp", env.targetAddr(), cfg)
+	if err != nil {
+		t.Fatalf("direct SSH to %s: %v", env.targetAddr(), err)
+	}
+	defer conn.Close()
+
+	sess, err := conn.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer sess.Close()
+
+	var stdoutBuf bytes.Buffer
+	sess.Stdout = &stdoutBuf
+	sess.Stderr = os.Stderr
+
+	if err := sess.Run(cmd); err != nil {
+		t.Fatalf("session run %q: %v\noutput: %s", cmd, err, stdoutBuf.String())
+	}
+
+	return strings.TrimSpace(stdoutBuf.String())
+}
+
 // lastLine returns the last non-empty line from s (strips MOTD etc).
 func lastLine(s string) string {
 	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
@@ -410,6 +444,134 @@ func TestE2E_YubiKey(t *testing.T) {
 	k.Close()
 
 	testBackend(t, env, keyCfg, env.ProxyUser)
+}
+
+// testDirectBackend runs the direct-connection e2e flow for a given key config.
+func testDirectBackend(t *testing.T, env testEnv, keyCfg config.KeyConfig) {
+	t.Helper()
+
+	// ── Step 0: Delete/recreate key so we always test key creation ───────────
+	var key *keychain.Key
+	if keyCfg.KeySource == "yubikey_piv" {
+		t.Logf("step 0: force-creating new key on YubiKey slot %s", keyCfg.YubiKey.Slot)
+		var err error
+		key, err = keychain.ForceCreateKey(keyCfg)
+		if err != nil {
+			t.Fatalf("ForceCreateKey: %v", err)
+		}
+		defer key.Close()
+		t.Logf("created new YubiKey key: %s", keyCfg.Tag)
+	} else {
+		t.Logf("step 0: deleting existing key %s from Keychain (if any)", keyCfg.Tag)
+		if err := keychain.DeleteKey(keyCfg.Tag); err != nil {
+			t.Fatalf("DeleteKey: %v", err)
+		}
+
+		t.Log("step 1: creating key")
+		var created bool
+		var err error
+		key, created, err = keychain.EnsureKey(keyCfg)
+		if err != nil {
+			t.Fatalf("EnsureKey: %v", err)
+		}
+		defer key.Close()
+		if !created {
+			t.Errorf("expected key to be created (was deleted in step 0), got loaded=true")
+		}
+		t.Logf("created new key: %s", keyCfg.Tag)
+	}
+
+	authorizedKeyLine := strings.TrimRight(string(key.AuthorizedKey()), "\n")
+	t.Logf("public key: %s", authorizedKeyLine)
+
+	// ── Step 2: Authorise public key on target via direct SSH ──────────────
+	t.Log("step 2: authorising key on target via direct SSH")
+	directConn := directClient(t, env)
+	defer directConn.Close()
+
+	authorizeKey(t, directConn, authorizedKeyLine)
+	t.Cleanup(func() {
+		t.Log("cleanup: removing test key from target authorized_keys")
+		cleanConn := directClient(t, env)
+		defer cleanConn.Close()
+		deauthorizeKey(t, cleanConn, authorizedKeyLine)
+	})
+
+	time.Sleep(500 * time.Millisecond)
+
+	// ── Step 3: Connect directly (no proxy) and run a command ──────────────
+	t.Log("step 3: connecting directly to target (no proxy)")
+	signer := key.SSHSigner()
+	output := runDirect(t, env, signer, "hostname")
+
+	if output == "" {
+		t.Fatal("expected non-empty output from hostname command via direct connection")
+	}
+	t.Logf("hostname via direct: %q", output)
+
+	whoami := runDirect(t, env, signer, "whoami")
+	if whoami != env.TargetUser {
+		t.Errorf("expected whoami=%q, got %q", env.TargetUser, whoami)
+	}
+	t.Logf("whoami via direct: %q", whoami)
+}
+
+func TestE2E_SecureEnclave_Direct(t *testing.T) {
+	env := loadTestEnv(t)
+
+	if env.ProxyAddr == "" {
+		t.Fatal("testenv.json: proxy_addr is required for direct tests (to set up authorized keys)")
+	}
+
+	tag := env.SEKeyTag
+	if tag == "" {
+		tag = "com.example.sshcli.e2e.se.direct"
+	}
+	label := env.SEKeyLabel
+	if label == "" {
+		label = "ssh-cli e2e test SE direct key"
+	}
+
+	keyCfg := config.KeyConfig{
+		Tag:       tag,
+		Label:     label,
+		Comment:   "e2e-se-direct@test",
+		KeySource: "secure_enclave",
+	}
+
+	testDirectBackend(t, env, keyCfg)
+}
+
+func TestE2E_YubiKey_Direct(t *testing.T) {
+	env := loadTestEnv(t)
+
+	if env.ProxyAddr == "" {
+		t.Fatal("testenv.json: proxy_addr is required for direct tests (to set up authorized keys)")
+	}
+
+	slot := env.YubiKeySlot
+	if slot == "" {
+		slot = "9a"
+	}
+
+	keyCfg := config.KeyConfig{
+		Tag:       fmt.Sprintf("com.example.sshcli.e2e.yk.%s.direct", slot),
+		Label:     fmt.Sprintf("ssh-cli e2e YubiKey slot %s direct", slot),
+		Comment:   fmt.Sprintf("e2e-yubikey-%s-direct@test", slot),
+		KeySource: "yubikey_piv",
+		YubiKey:   config.YubiKeyConfig{Slot: slot},
+	}
+
+	k, _, err := keychain.EnsureKey(keyCfg)
+	if err != nil {
+		if isNoYubiKeyError(err) {
+			t.Skipf("YubiKey not available: %v", err)
+		}
+		t.Fatalf("EnsureKey (yubikey probe): %v", err)
+	}
+	k.Close()
+
+	testDirectBackend(t, env, keyCfg)
 }
 
 // isNoYubiKeyError returns true when the error indicates no smart card reader.
