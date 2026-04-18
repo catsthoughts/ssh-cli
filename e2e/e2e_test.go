@@ -43,12 +43,12 @@ import (
 type testEnv struct {
 	// Proxy (ssh-proxy-server)
 	ProxyAddr string `json:"proxy_addr"` // e.g. "127.0.0.1:2222"
-	ProxyUser string `json:"proxy_user"` // e.g. "ekilimchuk"
+	ProxyUser string `json:"proxy_user"` // e.g. "ssh_user"
 
 	// Jump target (accessed through the proxy)
-	TargetHost string `json:"target_host"` // e.g. "spacepilot.ru"
+	TargetHost string `json:"target_host"` // e.g. "target_host:22"
 	TargetPort string `json:"target_port"` // e.g. "22"
-	TargetUser string `json:"target_user"` // e.g. "ekilimchuk"
+	TargetUser string `json:"target_user"` // e.g. "ssh_user"
 
 	// Direct SSH credentials for the target (used ONLY to upload/remove the public key)
 	TargetDirectPassword string `json:"target_direct_password"` // or leave empty to use agent
