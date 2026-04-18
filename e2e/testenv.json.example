@@ -1,0 +1,15 @@
+{
+  "proxy_addr":              "127.0.0.1:2222",
+  "proxy_user":              "username",
+
+  "target_host":             "example.com",
+  "target_port":             "22",
+  "target_user":             "username",
+
+  "target_direct_password":  "REPLACE_WITH_PASSWORD",
+
+  "se_key_tag":              "com.example.sshcli.e2e.se.test",
+  "se_key_label":            "ssh-cli e2e test SE key",
+
+  "yubikey_slot":            "9d"
+}
