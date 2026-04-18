@@ -59,8 +59,8 @@ Running the command without a destination logs you into the bastion from the JSO
 To connect directly to an SSH server without a proxy, set `use_proxy: false` in the proxy section. The destination is passed as a CLI argument:
 
 ```bash
-ssh-cli -profile direct-se ekilimchuk@spacepilot.ru
-ssh-cli -profile direct-yubikey ekilimchuk@spacepilot.ru:22
+ssh-cli -profile direct-se your-user@target.example.com
+ssh-cli -profile direct-yubikey your-user@target.example.com:22
 ```
 
 Example profile configuration:
