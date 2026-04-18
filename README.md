@@ -428,6 +428,42 @@ ssh-cli-init create-cert
 }
 ```
 
+## Testing
+
+### Unit tests
+
+```bash
+go test ./...
+```
+
+### E2E tests
+
+E2E tests connect to a real SSH proxy (ssh-proxy-server) and target (spacepilot.ru) to verify the full flow.
+
+**Prerequisites:**
+- ssh-proxy-server listening on `127.0.0.1:2222`
+- SSH agent running (`SSH_AUTH_SOCK` set) or `target_direct_password` in testenv.json
+- Public key authorized on the target host
+
+**Setup:**
+
+```bash
+cp e2e/testenv.json.example e2e/testenv.json
+# edit e2e/testenv.json with your credentials
+```
+
+**Run:**
+
+```bash
+go test -v -tags e2e -timeout 120s ./e2e/
+```
+
+Tests covered:
+- `TestE2E_SecureEnclave` — key creation, proxy connection via SE
+- `TestE2E_YubiKey` — key creation, proxy connection via YubiKey
+- `TestE2E_SecureEnclave_Direct` — direct connection via SE (no proxy)
+- `TestE2E_YubiKey_Direct` — direct connection via YubiKey (no proxy)
+
 ## Notes
 
 - Secure Enclave keys are ECDSA P-256 on macOS.
