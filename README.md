@@ -54,6 +54,47 @@ ssh-cli prod-host
 
 Running the command without a destination logs you into the bastion from the JSON config.
 
+## Connect directly (no proxy)
+
+To connect directly to an SSH server without a proxy, set `use_proxy: false` in the proxy section. The destination is passed as a CLI argument:
+
+```bash
+ssh-cli -profile direct-se ekilimchuk@spacepilot.ru
+ssh-cli -profile direct-yubikey ekilimchuk@spacepilot.ru:22
+```
+
+Example profile configuration:
+
+```json
+{
+  "profiles": {
+    "direct-se": {
+      "key": {
+        "key_source": "secure_enclave"
+      },
+      "proxy": {
+        "use_proxy": false,
+        "user": "your-user",
+        "known_hosts": "~/.ssh/known_hosts",
+        "host_key_policy": "accept-new"
+      }
+    },
+    "direct-yubikey": {
+      "key": {
+        "key_source": "yubikey_piv",
+        "yubikey": { "slot": "9a" }
+      },
+      "proxy": {
+        "use_proxy": false,
+        "user": "your-user"
+      }
+    }
+  }
+}
+```
+
+`use_agent_forwarding` is ignored for direct connections since agent forwarding only applies to proxy tunnels.
+
 ## Key sources
 
 Use `key.key_source` to select the key backend:
@@ -318,6 +359,61 @@ ssh-cli-init create-cert
     "principals":          ["your-user"],
     "valid_for":           "8h",
     "subject_common_name": "your-user"
+  }
+}
+```
+
+### Direct connection (Secure Enclave)
+
+```json
+{
+  "key": {
+    "tag":             "com.example.sshcli.direct",
+    "label":           "Direct Connection Key (Secure Enclave)",
+    "comment":         "direct@mac",
+    "key_source":      "secure_enclave",
+    "public_key_path": "~/.ssh-cli/id_direct.pub"
+  },
+  "proxy": {
+    "use_proxy":              false,
+    "user":                   "your-user",
+    "known_hosts":            "~/.ssh/known_hosts",
+    "host_key_policy":         "accept-new",
+    "connect_timeout_seconds": 10
+  },
+  "target": {
+    "command":        "",
+    "request_tty":    true,
+    "forward_ctrl_c": false
+  }
+}
+```
+
+### Direct connection (YubiKey PIV)
+
+```json
+{
+  "key": {
+    "tag":             "com.example.sshcli.direct",
+    "label":           "Direct Connection Key (YubiKey)",
+    "comment":         "direct@yubikey",
+    "key_source":      "yubikey_piv",
+    "public_key_path": "~/.ssh-cli/id_direct.pub",
+    "yubikey": {
+      "slot": "9a"
+    }
+  },
+  "proxy": {
+    "use_proxy":              false,
+    "user":                   "your-user",
+    "known_hosts":            "~/.ssh/known_hosts",
+    "host_key_policy":         "accept-new",
+    "connect_timeout_seconds": 10
+  },
+  "target": {
+    "command":        "",
+    "request_tty":    true,
+    "forward_ctrl_c": false
   }
 }
 ```

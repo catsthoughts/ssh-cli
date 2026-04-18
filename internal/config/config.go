@@ -64,6 +64,7 @@ func (k KeyConfig) MarshalJSON() ([]byte, error) {
 }
 
 type ProxyConfig struct {
+	UseProxy              bool      `json:"use_proxy"`
 	Address               Addresses `json:"address"`
 	User                  string    `json:"user"`
 	KnownHosts            string    `json:"known_hosts"`
@@ -129,6 +130,7 @@ func Default() Config {
 			PublicKeyPath: "./id_secure_enclave.pub",
 		},
 		Proxy: ProxyConfig{
+			UseProxy:              true,
 			Address:               Addresses{"127.0.0.1:2222"},
 			User:                  currentUser,
 			KnownHosts:            "~/.ssh/known_hosts",
@@ -257,6 +259,15 @@ type SingleProxy struct {
 	ConnectTimeoutSeconds int
 }
 
+func hasNonEmptyAddress(addrs Addresses) bool {
+	for _, a := range addrs {
+		if strings.TrimSpace(a) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) normalize(basePath string) {
 	c.Key.PublicKeyPath = resolvePath(basePath, c.Key.PublicKeyPath)
 	c.Certificate.CAKeyPath = resolvePath(basePath, c.Certificate.CAKeyPath)
@@ -264,6 +275,9 @@ func (c *Config) normalize(basePath string) {
 	c.Certificate.AuthCertPath = resolvePath(basePath, c.Certificate.AuthCertPath)
 
 	c.Proxy.KnownHosts = resolvePath(basePath, c.Proxy.KnownHosts)
+	if hasNonEmptyAddress(c.Proxy.Address) && !c.Proxy.UseProxy {
+		c.Proxy.UseProxy = true
+	}
 	if strings.TrimSpace(c.Proxy.User) == "" {
 		c.Proxy.User = currentUsername()
 	}
@@ -331,23 +345,61 @@ func (c Config) Validate() error {
 	if c.Key.PublicKeyPath == "" {
 		return errors.New("key.public_key_path is required")
 	}
+	if c.Proxy.UseProxy && len(c.Proxy.Address) == 0 {
+		return errors.New("proxy.address is required when proxy is enabled")
+	}
 	return nil
 }
 
 func WriteExample(path string) error {
 	currentUser := currentUsername()
 	file := ConfigFile{
-		ActiveProfile: "prod",
+		ActiveProfile: "prod-se",
 		Profiles: map[string]Config{
-			"prod": {
+			"prod-se": {
 				Key: KeyConfig{
 					Tag:           "com.example.sshcli.prod",
-					Label:         "Production Key",
+					Label:         "Production Key (Secure Enclave)",
 					Comment:       "prod@mac",
 					KeySource:     "secure_enclave",
 					PublicKeyPath: "~/.ssh-cli/id_prod.pub",
 				},
 				Proxy: ProxyConfig{
+					UseProxy:              true,
+					Address:               Addresses{"proxy.example.com:2222"},
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    true,
+					ConnectTimeoutSeconds: 10,
+					BalanceMode:           "failover",
+					RetryAttempts:         1,
+					RetryDelaySeconds:     5,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_prod-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "8h",
+					SubjectCommonName: currentUser,
+				},
+			},
+			"prod-yubikey": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.prod",
+					Label:         "Production Key (YubiKey)",
+					Comment:       "prod@mac",
+					KeySource:     "yubikey_piv",
+					PublicKeyPath: "~/.ssh-cli/id_prod.pub",
+					YubiKey:       YubiKeyConfig{Slot: "9a"},
+				},
+				Proxy: ProxyConfig{
+					UseProxy:              true,
 					Address:               Addresses{"proxy.example.com:2222"},
 					User:                  currentUser,
 					KnownHosts:            "~/.ssh/known_hosts",
@@ -381,6 +433,7 @@ func WriteExample(path string) error {
 					YubiKey:       YubiKeyConfig{Slot: "9a"},
 				},
 				Proxy: ProxyConfig{
+					UseProxy:              true,
 					Address:               Addresses{"proxy-staging.example.com:2222"},
 					User:                  currentUser,
 					KnownHosts:            "~/.ssh/known_hosts",
@@ -398,6 +451,95 @@ func WriteExample(path string) error {
 				Certificate: CertificateConfig{
 					Type:              "ssh-user",
 					OutputPath:        "~/.ssh-cli/id_staging-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "8h",
+					SubjectCommonName: currentUser,
+				},
+			},
+			"dev-se": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.dev",
+					Label:         "Dev Key (Secure Enclave)",
+					Comment:       "dev@mac",
+					KeySource:     "secure_enclave",
+					PublicKeyPath: "~/.ssh-cli/id_dev.pub",
+				},
+				Proxy: ProxyConfig{
+					UseProxy:              true,
+					Address:               Addresses{"proxy-dev.example.com:2222"},
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    false,
+					ConnectTimeoutSeconds: 5,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_dev-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "24h",
+					SubjectCommonName: currentUser,
+				},
+			},
+			"direct-se": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.direct",
+					Label:         "Direct Connection Key (Secure Enclave)",
+					Comment:       "direct@mac",
+					KeySource:     "secure_enclave",
+					PublicKeyPath: "~/.ssh-cli/id_direct.pub",
+				},
+				Proxy: ProxyConfig{
+					UseProxy:              false,
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    false,
+					ConnectTimeoutSeconds: 10,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_direct-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "8h",
+					SubjectCommonName: currentUser,
+				},
+			},
+			"direct-yubikey": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.direct",
+					Label:         "Direct Connection Key (YubiKey)",
+					Comment:       "direct@yubikey",
+					KeySource:     "yubikey_piv",
+					PublicKeyPath: "~/.ssh-cli/id_direct.pub",
+					YubiKey:       YubiKeyConfig{Slot: "9a"},
+				},
+				Proxy: ProxyConfig{
+					UseProxy:              false,
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    false,
+					ConnectTimeoutSeconds: 10,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_direct-cert.pub",
 					Identity:          currentUser,
 					Principals:        []string{currentUser},
 					ValidFor:          "8h",
