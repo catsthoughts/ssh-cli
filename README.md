@@ -438,7 +438,7 @@ go test ./...
 
 ### E2E tests
 
-E2E tests connect to a real SSH proxy (ssh-proxy-server) and target (spacepilot.ru) to verify the full flow.
+E2E tests connect to a real SSH proxy (ssh-proxy-server) and target host to verify the full flow.
 
 **Prerequisites:**
 - ssh-proxy-server listening on `127.0.0.1:2222`
