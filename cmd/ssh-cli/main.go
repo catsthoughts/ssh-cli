@@ -36,10 +36,11 @@ func run(args []string) error {
 func loadConfigFromArgs(args []string) (config.Config, []string, error) {
 	fs := flag.NewFlagSet("ssh-cli", flag.ContinueOnError)
 	path := fs.String("config", config.MustDefaultConfigPath(), "path to JSON config")
+	profile := fs.String("profile", "", "profile name (for multi-profile configs)")
 	if err := fs.Parse(args); err != nil {
 		return config.Config{}, nil, err
 	}
-	cfg, err := config.Load(*path)
+	cfg, err := config.LoadProfile(*path, *profile)
 	if err != nil {
 		return config.Config{}, nil, err
 	}
@@ -84,16 +85,21 @@ func printUsage() {
 Usage:
   ssh-cli [options] [destination]
 
+Options:
+  -config   path to JSON config (default: ~/.ssh-cli/config.json)
+  -profile  profile name in multi-profile config (default: active_profile)
+
 Examples:
   ssh-cli
   ssh-cli prod-host
   ssh-cli your-user@prod-host:22
-  ssh-cli -config ~/.ssh-cli/config.json
+  ssh-cli -profile staging your-user@staging-host
 
 Initialization:
   ssh-cli-init init-config
   ssh-cli-init create-key
-  ssh-cli-init create-cert
+  ssh-cli-init create-key -profile staging
+  ssh-cli-init create-cert -profile prod
 
 Default config path:
   ~/.ssh-cli/config.json

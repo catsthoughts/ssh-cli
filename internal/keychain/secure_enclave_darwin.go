@@ -204,6 +204,24 @@ static int gosec_ensure_key(const char *tag, const char *label, int useSecureEnc
 	return created ? 2 : 1;
 }
 
+static int gosec_delete_key(const char *tag, char **errOut) {
+	CFDataRef tagData = data_from_cstr(tag);
+	const void *keys[3];
+	const void *vals[3];
+	keys[0] = kSecClass;              vals[0] = kSecClassKey;
+	keys[1] = kSecAttrApplicationTag; vals[1] = tagData;
+	keys[2] = kSecAttrKeyClass;       vals[2] = kSecAttrKeyClassPrivate;
+	CFDictionaryRef query = CFDictionaryCreate(kCFAllocatorDefault, keys, vals, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	OSStatus status = SecItemDelete(query);
+	CFRelease(query);
+	CFRelease(tagData);
+	if (status != errSecSuccess && status != errSecItemNotFound) {
+		if (errOut) *errOut = osstatus_to_cstr(status);
+		return 0;
+	}
+	return 1;
+}
+
 static int gosec_sign_with_keyref(SecKeyRef key, const unsigned char *digest, int digestLen, unsigned char **outBytes, int *outLen, char **errOut) {
 	if (!key) {
 		*errOut = strdup("private key ref is nil");
@@ -242,63 +260,87 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
 
-	"golang.org/x/crypto/ssh"
 	"ssh-cli/internal/config"
 )
 
-type Key struct {
+// darwinBackend implements keyBackend for macOS Secure Enclave / Keychain.
+type darwinBackend struct {
 	mu      sync.Mutex
-	cfg     config.KeyConfig
-	pub     *ecdsa.PublicKey
-	sshPub  ssh.PublicKey
-	keyRef  unsafe.Pointer // cached SecKeyRef
-	authCtx unsafe.Pointer // cached LAContext (keeps auth session alive)
+	keyRef  unsafe.Pointer // SecKeyRef
+	authCtx unsafe.Pointer // LAContext (optional)
 }
 
-type SSHSigner struct {
-	key *Key
-}
-
-type ecdsaASN1Signature struct {
-	R, S *big.Int
-}
-
-func EnsureKey(cfg config.KeyConfig) (*Key, bool, error) {
-	key, created, err := ensureKey(cfg, true)
-	if err == nil {
-		return key, created, nil
+func (b *darwinBackend) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([]byte, error) {
+	if len(digest) == 0 {
+		return nil, errors.New("empty digest")
 	}
-	if shouldRetryWithoutSecureEnclave(err) {
-		key, created, retryErr := ensureKey(cfg, false)
-		if retryErr == nil {
-			return key, created, nil
-		}
-		if cfg.SecureEnclave {
-			fallbackCfg := cfg
-			fallbackCfg.SecureEnclave = false
-			return ensureKey(fallbackCfg, false)
-		}
-		return nil, false, retryErr
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.keyRef == nil {
+		return nil, errors.New("key has been closed")
 	}
-	return nil, false, err
+	var out *C.uchar
+	var outLen C.int
+	var cerr *C.char
+	if C.gosec_sign_with_keyref(C.SecKeyRef(b.keyRef), (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, &cerr) == 0 {
+		return nil, cStringErr(cerr)
+	}
+	defer C.free(unsafe.Pointer(out))
+	return C.GoBytes(unsafe.Pointer(out), outLen), nil
 }
 
-func ensureKey(cfg config.KeyConfig, useAccessControl bool) (*Key, bool, error) {
+func (b *darwinBackend) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.keyRef != nil {
+		C.gosec_release_key(C.SecKeyRef(b.keyRef))
+		b.keyRef = nil
+	}
+	if b.authCtx != nil {
+		C.sshcli_release_auth_context(C.CFTypeRef(b.authCtx))
+		b.authCtx = nil
+	}
+}
+
+// DeleteKey removes the private key with the given tag from the Keychain.
+// Returns nil if the key did not exist.
+func DeleteKey(tag string) error {
+	ctag := C.CString(tag)
+	defer C.free(unsafe.Pointer(ctag))
+	var cerr *C.char
+	if C.gosec_delete_key(ctag, &cerr) == 0 {
+		return cStringErr(cerr)
+	}
+	return nil
+}
+
+func ensureSecureEnclave(cfg config.KeyConfig) (*ecdsa.PublicKey, *darwinBackend, bool, error) {
+	pub, backend, created, err := ensureKey(cfg, true)
+	if err != nil && shouldRetryWithoutSecureEnclave(err) {
+		if backend != nil {
+			backend.Close()
+		}
+		// Fallback: retry without Secure Enclave (plain Keychain)
+		fallbackCfg := cfg
+		fallbackCfg.SecureEnclave = false
+		fallbackCfg.KeySource = ""
+		return ensureKey(fallbackCfg, false)
+	}
+	return pub, backend, created, err
+}
+
+func ensureKey(cfg config.KeyConfig, useAccessControl bool) (*ecdsa.PublicKey, *darwinBackend, bool, error) {
 	if cfg.Tag == "" {
-		return nil, false, errors.New("key tag is required")
+		return nil, nil, false, errors.New("key tag is required")
 	}
 	if cfg.Label == "" {
 		cfg.Label = cfg.Tag
@@ -315,9 +357,10 @@ func ensureKey(cfg config.KeyConfig, useAccessControl bool) (*Key, bool, error) 
 	var cKeyRef C.SecKeyRef
 	var cAuthCtx C.CFTypeRef
 
-	status := C.gosec_ensure_key(ctag, clabel, boolToCInt(cfg.SecureEnclave), boolToCInt(useAccessControl), &out, &outLen, &cKeyRef, &cAuthCtx, &cerr)
+	useSeEnclave := cfg.SecureEnclave || cfg.KeySource == "secure_enclave"
+	status := C.gosec_ensure_key(ctag, clabel, boolToCInt(useSeEnclave), boolToCInt(useAccessControl), &out, &outLen, &cKeyRef, &cAuthCtx, &cerr)
 	if status == 0 {
-		return nil, false, cStringErr(cerr)
+		return nil, nil, false, cStringErr(cerr)
 	}
 	defer C.free(unsafe.Pointer(out))
 
@@ -326,16 +369,14 @@ func ensureKey(cfg config.KeyConfig, useAccessControl bool) (*Key, bool, error) 
 	if err != nil {
 		C.gosec_release_key(cKeyRef)
 		C.sshcli_release_auth_context(cAuthCtx)
-		return nil, false, err
-	}
-	sshPub, err := ssh.NewPublicKey(pub)
-	if err != nil {
-		C.gosec_release_key(cKeyRef)
-		C.sshcli_release_auth_context(cAuthCtx)
-		return nil, false, err
+		return nil, nil, false, err
 	}
 
-	return &Key{cfg: cfg, pub: pub, sshPub: sshPub, keyRef: unsafe.Pointer(cKeyRef), authCtx: unsafe.Pointer(cAuthCtx)}, status == 2, nil
+	backend := &darwinBackend{
+		keyRef:  unsafe.Pointer(cKeyRef),
+		authCtx: unsafe.Pointer(cAuthCtx),
+	}
+	return pub, backend, status == 2, nil
 }
 
 func shouldRetryWithoutSecureEnclave(err error) bool {
@@ -346,101 +387,6 @@ func shouldRetryWithoutSecureEnclave(err error) bool {
 	return strings.Contains(msg, "-34018") ||
 		strings.Contains(msg, "missing entitlement") ||
 		strings.Contains(msg, "failed to add key to keychain")
-}
-
-func (k *Key) Public() crypto.PublicKey {
-	return k.pub
-}
-
-func (k *Key) IsSecureEnclave() bool {
-	return k.cfg.SecureEnclave
-}
-
-func (k *Key) SSHPublicKey() ssh.PublicKey {
-	return k.sshPub
-}
-
-func (k *Key) AuthorizedKey() []byte {
-	buf := ssh.MarshalAuthorizedKey(k.sshPub)
-	if k.cfg.Comment == "" {
-		return buf
-	}
-	return append(buf[:len(buf)-1], []byte(" "+k.cfg.Comment+"\n")...)
-}
-
-func (k *Key) SSHSigner() ssh.Signer {
-	return &SSHSigner{key: k}
-}
-
-func (k *Key) Close() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.keyRef != nil {
-		C.gosec_release_key(C.SecKeyRef(k.keyRef))
-		k.keyRef = nil
-	}
-	if k.authCtx != nil {
-		C.sshcli_release_auth_context(C.CFTypeRef(k.authCtx))
-		k.authCtx = nil
-	}
-}
-
-func (k *Key) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	if opts == nil || opts.HashFunc() != crypto.SHA256 {
-		return nil, errors.New("only SHA-256 is supported for Secure Enclave signing")
-	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.keyRef == nil {
-		return nil, errors.New("key has been closed")
-	}
-
-	var out *C.uchar
-	var outLen C.int
-	var cerr *C.char
-	if len(digest) == 0 {
-		return nil, errors.New("empty digest")
-	}
-	if C.gosec_sign_with_keyref(C.SecKeyRef(k.keyRef), (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, &cerr) == 0 {
-		return nil, cStringErr(cerr)
-	}
-	defer C.free(unsafe.Pointer(out))
-	return C.GoBytes(unsafe.Pointer(out), outLen), nil
-}
-
-func (s *SSHSigner) PublicKey() ssh.PublicKey {
-	return s.key.SSHPublicKey()
-}
-
-func (s *SSHSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
-	return s.SignWithAlgorithm(rand, data, ssh.KeyAlgoECDSA256)
-}
-
-func (s *SSHSigner) SignWithAlgorithm(_ io.Reader, data []byte, algorithm string) (*ssh.Signature, error) {
-	if algorithm != "" && algorithm != ssh.KeyAlgoECDSA256 {
-		return nil, fmt.Errorf("unsupported ssh algorithm: %s", algorithm)
-	}
-	digest := sha256.Sum256(data)
-	der, err := s.key.Sign(nil, digest[:], crypto.SHA256)
-	if err != nil {
-		return nil, err
-	}
-	var parsed ecdsaASN1Signature
-	if _, err := asn1.Unmarshal(der, &parsed); err != nil {
-		return nil, fmt.Errorf("parse ecdsa signature: %w", err)
-	}
-	blob := ssh.Marshal(parsed)
-	return &ssh.Signature{Format: ssh.KeyAlgoECDSA256, Blob: blob}, nil
-}
-
-func WriteAuthorizedKeyFile(path string, data []byte) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 func parsePublicKey(raw []byte) (*ecdsa.PublicKey, error) {

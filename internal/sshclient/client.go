@@ -8,10 +8,9 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	agentutil "ssh-cli/internal/agent"
@@ -287,55 +286,21 @@ func attachAndRun(session *ssh.Session, cfg config.Config) error {
 	return session.Wait()
 }
 
-func watchTerminalResize(session *ssh.Session, fd int) func() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	go func() {
-		for range sigCh {
-			w, h, err := term.GetSize(fd)
-			if err == nil {
-				_ = session.WindowChange(h, w)
-			}
-		}
-	}()
-	return func() {
-		signal.Stop(sigCh)
-		close(sigCh)
-	}
-}
-
 // ctrlCInterceptor wraps stdin and intercepts 0x03 (Ctrl+C) bytes.
 // First Ctrl+C is forwarded to the remote session as-is.
 // Two Ctrl+C presses within 1 second terminate the local process.
+// The Read method and watchTerminalResize are implemented in platform-specific files.
 type ctrlCInterceptor struct {
 	r         io.Reader
 	stderr    io.Writer
+	mu        sync.Mutex
 	lastPress time.Time
-}
-
-func (c *ctrlCInterceptor) Read(dst []byte) (int, error) {
-	n, err := c.r.Read(dst)
-	if n > 0 && err == nil {
-		for i := 0; i < n; i++ {
-			if dst[i] == 0x03 {
-				now := time.Now()
-				if now.Sub(c.lastPress) < 1*time.Second {
-					fmt.Fprintf(c.stderr, "\r\nDouble Ctrl+C — exiting\r\n")
-					syscall.Kill(syscall.Getpid(), syscall.SIGINT)
-					return 0, io.EOF
-				}
-				c.lastPress = now
-				fmt.Fprintf(c.stderr, "\r\n[Ctrl+C sent to remote — press again within 1s to exit]\r\n")
-			}
-		}
-	}
-	return n, err
 }
 
 // crlfWriter translates bare \n into \r\n so that output from the remote
 // side renders correctly when the local terminal is in raw mode.
 type crlfWriter struct {
-	w   io.Writer
+	w    io.Writer
 	prev byte
 }
 

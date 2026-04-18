@@ -7,11 +7,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 type Config struct {
-	Profile     string            `json:"profile"`
+	Profile     string            `json:"profile,omitempty"`
 	Key         KeyConfig         `json:"key"`
 	Proxy       ProxyConfig       `json:"proxy"`
 	Target      TargetConfig      `json:"target"`
@@ -19,11 +20,47 @@ type Config struct {
 }
 
 type KeyConfig struct {
-	Tag           string `json:"tag"`
-	Label         string `json:"label"`
-	Comment       string `json:"comment"`
-	SecureEnclave bool   `json:"secure_enclave"`
-	PublicKeyPath string `json:"public_key_path"`
+	Tag           string        `json:"tag"`
+	Label         string        `json:"label"`
+	Comment       string        `json:"comment,omitempty"`
+	SecureEnclave bool          `json:"secure_enclave,omitempty"` // deprecated: use KeySource="secure_enclave"
+	PublicKeyPath string        `json:"public_key_path"`
+	KeySource     string        `json:"key_source,omitempty"` // "secure_enclave", "yubikey_piv"
+	YubiKey       YubiKeyConfig `json:"yubikey,omitempty"`
+}
+
+type YubiKeyConfig struct {
+	Slot       string `json:"slot,omitempty"`        // PIV slot: "9a", "9c", "9d", "9e"
+	PIN        string `json:"pin,omitempty"`         // optional PIN
+	PKCS11Path string `json:"pkcs11_path,omitempty"` // path to PC/SC library (Linux only)
+}
+
+func (y YubiKeyConfig) isEmpty() bool {
+	return y.Slot == "" && y.PIN == "" && y.PKCS11Path == ""
+}
+
+// MarshalJSON omits the yubikey field entirely when it is empty.
+func (k KeyConfig) MarshalJSON() ([]byte, error) {
+	type Alias KeyConfig
+	if k.YubiKey.isEmpty() {
+		type KeyConfigNoYubiKey struct {
+			Tag           string `json:"tag"`
+			Label         string `json:"label"`
+			Comment       string `json:"comment,omitempty"`
+			SecureEnclave bool   `json:"secure_enclave,omitempty"`
+			PublicKeyPath string `json:"public_key_path"`
+			KeySource     string `json:"key_source,omitempty"`
+		}
+		return json.Marshal(KeyConfigNoYubiKey{
+			Tag:           k.Tag,
+			Label:         k.Label,
+			Comment:       k.Comment,
+			SecureEnclave: k.SecureEnclave,
+			PublicKeyPath: k.PublicKeyPath,
+			KeySource:     k.KeySource,
+		})
+	}
+	return json.Marshal(Alias(k))
 }
 
 type ProxyConfig struct {
@@ -64,9 +101,9 @@ func (a Addresses) MarshalJSON() ([]byte, error) {
 }
 
 type TargetConfig struct {
-	Command       string `json:"command"`
-	RequestTTY    bool   `json:"request_tty"`
-	ForwardCtrlC  bool   `json:"forward_ctrl_c"`
+	Command      string `json:"command"`
+	RequestTTY   bool   `json:"request_tty"`
+	ForwardCtrlC bool   `json:"forward_ctrl_c"`
 }
 
 type CertificateConfig struct {
@@ -130,12 +167,57 @@ func MustDefaultConfigPath() string {
 	return path
 }
 
+// ConfigFile is the top-level JSON structure supporting multi-profile format.
+type ConfigFile struct {
+	Profiles      map[string]Config `json:"profiles,omitempty"`
+	ActiveProfile string            `json:"active_profile,omitempty"`
+}
+
+// Load reads the config file and returns the active profile.
+// Supports both flat (legacy) format and multi-profile format.
 func Load(path string) (Config, error) {
-	cfg := Default()
+	return LoadProfile(path, "")
+}
+
+// LoadProfile reads the config file and returns the named profile.
+// If profile is empty, uses active_profile from the file, or the first profile.
+// Falls back to flat format if no "profiles" key is present.
+func LoadProfile(path, profile string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+
+	// Try multi-profile format first.
+	var file ConfigFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return Config{}, fmt.Errorf("parse json config: %w", err)
+	}
+
+	if len(file.Profiles) > 0 {
+		name := profile
+		if name == "" {
+			name = file.ActiveProfile
+		}
+		if name == "" {
+			// Pick first profile alphabetically for determinism.
+			for k := range file.Profiles {
+				if name == "" || k < name {
+					name = k
+				}
+			}
+		}
+		cfg, ok := file.Profiles[name]
+		if !ok {
+			return Config{}, fmt.Errorf("profile %q not found", name)
+		}
+		cfg.Profile = name
+		cfg.normalize(path)
+		return cfg, nil
+	}
+
+	// Fall back to flat (legacy) format.
+	cfg := Default()
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse json config: %w", err)
 	}
@@ -201,6 +283,17 @@ func (c *Config) normalize(basePath string) {
 	if c.Proxy.RetryDelaySeconds < 0 {
 		c.Proxy.RetryDelaySeconds = 0
 	}
+
+	// Derive KeySource from legacy SecureEnclave flag for backward compatibility
+	if c.Key.KeySource == "" {
+		if c.Key.SecureEnclave {
+			c.Key.KeySource = "secure_enclave"
+		}
+	}
+	// YubiKey defaults
+	if c.Key.KeySource == "yubikey_piv" && c.Key.YubiKey.Slot == "" {
+		c.Key.YubiKey.Slot = "9a"
+	}
 }
 
 func normalizeProxy(p *ProxyConfig, basePath string) {
@@ -242,19 +335,130 @@ func (c Config) Validate() error {
 }
 
 func WriteExample(path string) error {
-	cfg := Default()
-	cfg.normalize(path)
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	currentUser := currentUsername()
+	file := ConfigFile{
+		ActiveProfile: "prod",
+		Profiles: map[string]Config{
+			"prod": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.prod",
+					Label:         "Production Key",
+					Comment:       "prod@mac",
+					KeySource:     "secure_enclave",
+					PublicKeyPath: "~/.ssh-cli/id_prod.pub",
+				},
+				Proxy: ProxyConfig{
+					Address:               Addresses{"proxy.example.com:2222"},
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    true,
+					ConnectTimeoutSeconds: 10,
+					BalanceMode:           "failover",
+					RetryAttempts:         1,
+					RetryDelaySeconds:     5,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_prod-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "8h",
+					SubjectCommonName: currentUser,
+				},
+			},
+			"staging": {
+				Key: KeyConfig{
+					Tag:           "com.example.sshcli.staging",
+					Label:         "Staging Key",
+					Comment:       "staging@mac",
+					KeySource:     "yubikey_piv",
+					PublicKeyPath: "~/.ssh-cli/id_staging.pub",
+					YubiKey:       YubiKeyConfig{Slot: "9a"},
+				},
+				Proxy: ProxyConfig{
+					Address:               Addresses{"proxy-staging.example.com:2222"},
+					User:                  currentUser,
+					KnownHosts:            "~/.ssh/known_hosts",
+					HostKeyPolicy:         "accept-new",
+					UseAgentForwarding:    true,
+					ConnectTimeoutSeconds: 10,
+					BalanceMode:           "failover",
+					RetryAttempts:         1,
+					RetryDelaySeconds:     5,
+				},
+				Target: TargetConfig{
+					RequestTTY:   true,
+					ForwardCtrlC: false,
+				},
+				Certificate: CertificateConfig{
+					Type:              "ssh-user",
+					OutputPath:        "~/.ssh-cli/id_staging-cert.pub",
+					Identity:          currentUser,
+					Principals:        []string{currentUser},
+					ValidFor:          "8h",
+					SubjectCommonName: currentUser,
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return err
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+// ListProfiles returns the profile names from a multi-profile config file.
+// Returns an error if the file is not in multi-profile format.
+func ListProfiles(path string) (names []string, active string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read config: %w", err)
 	}
-	return nil
+	var file ConfigFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, "", fmt.Errorf("parse json config: %w", err)
+	}
+	if len(file.Profiles) == 0 {
+		return nil, "", errors.New("config is not in multi-profile format")
+	}
+	for name := range file.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, file.ActiveProfile, nil
+}
+
+// SetActiveProfile updates active_profile in a multi-profile config file.
+func SetActiveProfile(path, profile string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var file ConfigFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return fmt.Errorf("parse json config: %w", err)
+	}
+	if len(file.Profiles) == 0 {
+		return errors.New("config is not in multi-profile format")
+	}
+	if _, ok := file.Profiles[profile]; !ok {
+		return fmt.Errorf("profile %q not found", profile)
+	}
+	file.ActiveProfile = profile
+	out, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o600)
 }
 
 func resolvePath(basePath, value string) string {

@@ -7,3 +7,6 @@
 *.cast
 recordings/
 config.json
+
+# e2e test credentials — never commit real values
+e2e/testenv.json
