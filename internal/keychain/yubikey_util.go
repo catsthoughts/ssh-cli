@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,7 +78,9 @@ func defaultTouchPrompt() {
 }
 
 // parseSlot converts a string slot identifier to a piv.Slot.
+// Supports 4 main PIV slots (9a, 9c, 9d, 9e) and 20 retired key management slots (82-95).
 func parseSlot(s string) (piv.Slot, error) {
+	s = strings.TrimSpace(s)
 	switch s {
 	case "9a", "9A", "":
 		return piv.SlotAuthentication, nil
@@ -86,9 +90,25 @@ func parseSlot(s string) (piv.Slot, error) {
 		return piv.SlotKeyManagement, nil
 	case "9e", "9E":
 		return piv.SlotCardAuthentication, nil
-	default:
-		return piv.Slot{}, fmt.Errorf("unsupported yubikey slot: %s (supported: 9a, 9c, 9d, 9e)", s)
 	}
+
+	// Check retired key management slots (82-95)
+	slotNum := parseHexSlot(s)
+	if slot, ok := piv.RetiredKeyManagementSlot(slotNum); ok {
+		return slot, nil
+	}
+
+	return piv.Slot{}, fmt.Errorf("unsupported yubikey slot: %s (supported: 9a, 9c, 9d, 9e, 82-95)", s)
+}
+
+// parseHexSlot parses a hex string (e.g. "82", "9a") to uint32.
+func parseHexSlot(s string) uint32 {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s = s[2:]
+	}
+	v, _ := strconv.ParseUint(s, 16, 32)
+	return uint32(v)
 }
 
 // buildKey constructs a keychain.Key from piv components.
