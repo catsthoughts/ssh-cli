@@ -238,6 +238,8 @@ By default, Ctrl+C in a raw-mode session is sent directly to the remote side. En
 
 ## Certificate modes
 
+For a full walkthrough — including step-ca provisioner setup, sshd configuration, and troubleshooting — see [CERTIFICATES.md](CERTIFICATES.md).
+
 ### Auto-refresh via step-ca (recommended)
 
 The client integrates with [Smallstep step-ca](https://smallstep.com/docs/step-ca/) to automatically obtain and refresh SSH user certificates. On every `ssh-cli` invocation the stored certificate is checked; if it is missing or expires within `cert_refresh_before` (default `1h`), a new one is requested via OIDC device flow before connecting.
@@ -481,7 +483,7 @@ go test -v -tags e2e -timeout 120s ./e2e/            # E2E (requires docker)
 
 See [TESTING.md](TESTING.md) for full E2E setup instructions.
 
-For a detailed walkthrough of certificate-based authentication — including step-ca, sshd, and Keycloak setup — see [CERTIFICATES.md](CERTIFICATES.md).
+For a full walkthrough of certificate-based authentication — including step-ca, sshd, and Keycloak setup — see [CERTIFICATES.md](CERTIFICATES.md).
 
 ## Notes
 
