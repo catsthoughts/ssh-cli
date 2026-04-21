@@ -1,7 +1,4 @@
 {
-  "proxy_addr":              "127.0.0.1:2222",
-  "proxy_user":              "username",
-
   "target_host":             "example.com",
   "target_port":             "22",
   "target_user":             "username",

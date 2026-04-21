@@ -30,7 +30,6 @@ import (
 	"golang.org/x/crypto/ssh"
 	gossh_agent "golang.org/x/crypto/ssh/agent"
 
-	agentutil "ssh-cli/internal/agent"
 	"ssh-cli/internal/config"
 	"ssh-cli/internal/keychain"
 	_ "ssh-cli/internal/sshclient" // imported for side effects / build check
@@ -41,11 +40,7 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 type testEnv struct {
-	// Proxy (ssh-proxy-server)
-	ProxyAddr string `json:"proxy_addr"` // e.g. "127.0.0.1:2222"
-	ProxyUser string `json:"proxy_user"` // e.g. "ssh_user"
-
-	// Jump target (accessed through the proxy)
+	// Target (direct SSH)
 	TargetHost string `json:"target_host"` // e.g. "target_host:22"
 	TargetPort string `json:"target_port"` // e.g. "22"
 	TargetUser string `json:"target_user"` // e.g. "ssh_user"
@@ -70,9 +65,6 @@ func loadTestEnv(t *testing.T) testEnv {
 	var env testEnv
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("parse testenv.json: %v", err)
-	}
-	if env.ProxyAddr == "" {
-		t.Fatal("testenv.json: proxy_addr is required")
 	}
 	if env.TargetHost == "" {
 		t.Fatal("testenv.json: target_host is required")
@@ -183,74 +175,7 @@ func runRemote(t *testing.T, client *ssh.Client, cmd string) string {
 	return strings.TrimSpace(buf.String())
 }
 
-// runViaProxy connects to the proxy with the given signer and executes cmd on the
-// jump target. The proxy opens a shell session and tunnels stdin/stdout to the
-// target — so we pipe the command through stdin and read stdout until EOF.
-func runViaProxy(t *testing.T, env testEnv, cfg config.Config, signer ssh.Signer, cmd string) string {
-	t.Helper()
 
-	proxyClientCfg := &ssh.ClientConfig{
-		User:            env.ProxyUser,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // e2e only
-		Timeout:         30 * time.Second,
-	}
-
-	proxyConn, err := ssh.Dial("tcp", env.ProxyAddr, proxyClientCfg)
-	if err != nil {
-		t.Fatalf("connect to proxy %s: %v", env.ProxyAddr, err)
-	}
-	defer proxyConn.Close()
-
-	// Forward agent so proxy can auth to target.
-	fwdAgent := agentutil.NewReadOnlyAgent(cfg.Key.Comment, signer)
-	if err := gossh_agent.ForwardToAgent(proxyConn, fwdAgent); err != nil {
-		t.Fatalf("forward agent: %v", err)
-	}
-
-	sess, err := proxyConn.NewSession()
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	defer sess.Close()
-
-	if err := gossh_agent.RequestAgentForwarding(sess); err != nil {
-		t.Fatalf("request agent forwarding: %v", err)
-	}
-
-	// Tell the proxy which target to jump to.
-	target := fmt.Sprintf("%s@%s", env.TargetUser, env.targetAddr())
-	if err := sess.Setenv("LC_SSH_SERVER", target); err != nil {
-		t.Fatalf("setenv LC_SSH_SERVER: %v", err)
-	}
-
-	var stdoutBuf bytes.Buffer
-	sess.Stdout = &stdoutBuf
-	sess.Stderr = os.Stderr
-
-	// Pipe the command through stdin — proxy tunnels it to the target shell.
-	// We send the command followed by 'exit' to close the shell cleanly.
-	stdinPipe, err := sess.StdinPipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-
-	if err := sess.Shell(); err != nil {
-		t.Fatalf("start shell: %v", err)
-	}
-
-	// Write command + exit to stdin, then close.
-	fmt.Fprintf(stdinPipe, "%s; exit $?\n", cmd)
-	stdinPipe.Close()
-
-	if err := sess.Wait(); err != nil {
-		t.Fatalf("session wait: %v\noutput: %s", err, stdoutBuf.String())
-	}
-
-	// The proxy/target may prepend MOTD before command output.
-	// Take only the last non-empty line as the command result.
-	return lastLine(stdoutBuf.String())
-}
 
 // runDirect connects directly to the target (no proxy) with the given signer and executes cmd.
 func runDirect(t *testing.T, env testEnv, signer ssh.Signer, cmd string) string {
@@ -301,97 +226,8 @@ func lastLine(s string) string {
 // Core test logic (backend-agnostic)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// testBackend runs the full e2e flow for a given key config.
-func testBackend(t *testing.T, env testEnv, keyCfg config.KeyConfig, proxyUser string) {
-	t.Helper()
-
-	cfg := config.Config{
-		Key: keyCfg,
-		Proxy: config.ProxyConfig{
-			Address:               config.Addresses{env.ProxyAddr},
-			User:                  proxyUser,
-			InsecureIgnoreHostKey: true,
-			UseAgentForwarding:    true,
-			ConnectTimeoutSeconds: 15,
-			BalanceMode:           "failover",
-			RetryAttempts:         1,
-		},
-	}
-
-	// ── Step 0: Delete/recreate key so we always test key creation ───────────
-	var key *keychain.Key
-	if keyCfg.KeySource == "yubikey_piv" {
-		// YubiKey: use ForceCreateKey which resets the PIV slot and generates new key.
-		t.Logf("step 0: force-creating new key on YubiKey slot %s", keyCfg.YubiKey.Slot)
-		var err error
-		key, err = keychain.ForceCreateKey(keyCfg)
-		if err != nil {
-			t.Fatalf("ForceCreateKey: %v", err)
-		}
-		defer key.Close()
-		t.Logf("created new YubiKey key: %s", keyCfg.Tag)
-	} else {
-		// SE / software Keychain: delete then recreate.
-		t.Logf("step 0: deleting existing key %s from Keychain (if any)", keyCfg.Tag)
-		if err := keychain.DeleteKey(keyCfg.Tag); err != nil {
-			t.Fatalf("DeleteKey: %v", err)
-		}
-
-		// ── Step 1: EnsureKey ────────────────────────────────────────────────
-		t.Log("step 1: creating key")
-		var created bool
-		var err error
-		key, created, err = keychain.EnsureKey(keyCfg)
-		if err != nil {
-			t.Fatalf("EnsureKey: %v", err)
-		}
-		defer key.Close()
-		if !created {
-			t.Errorf("expected key to be created (was deleted in step 0), got loaded=true")
-		}
-		t.Logf("created new key: %s", keyCfg.Tag)
-	}
-
-	authorizedKeyLine := strings.TrimRight(string(key.AuthorizedKey()), "\n")
-	t.Logf("public key: %s", authorizedKeyLine)
-
-	// ── Step 2: Authorise public key on target ───────────────────────────────
-	t.Log("step 2: authorising key on target via direct SSH")
-	directConn := directClient(t, env)
-	defer directConn.Close()
-
-	authorizeKey(t, directConn, authorizedKeyLine)
-	// Cleanup: remove the key when the test finishes.
-	t.Cleanup(func() {
-		t.Log("cleanup: removing test key from target authorized_keys")
-		cleanConn := directClient(t, env)
-		defer cleanConn.Close()
-		deauthorizeKey(t, cleanConn, authorizedKeyLine)
-	})
-
-	// Give sshd a moment to reload authorized_keys (usually instant, but be safe).
-	time.Sleep(500 * time.Millisecond)
-
-	// ── Step 3: Connect via proxy and run a command ──────────────────────────
-	t.Log("step 3: connecting via proxy")
-	signer := key.SSHSigner()
-	output := runViaProxy(t, env, cfg, signer, "hostname")
-
-	if output == "" {
-		t.Fatal("expected non-empty output from hostname command via proxy")
-	}
-	t.Logf("hostname via proxy: %q", output)
-
-	// Also verify whoami returns expected user.
-	whoami := runViaProxy(t, env, cfg, signer, "whoami")
-	if whoami != env.TargetUser {
-		t.Errorf("expected whoami=%q, got %q", env.TargetUser, whoami)
-	}
-	t.Logf("whoami via proxy: %q", whoami)
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
-// Tests (direct SSH - no proxy required)
+// Tests (direct SSH)
 // ──────────────────────────────────────────────────────────────────────────────
 
 // testDirectBackend runs the direct-connection e2e flow for a given key config.
@@ -467,10 +303,6 @@ func testDirectBackend(t *testing.T, env testEnv, keyCfg config.KeyConfig) {
 func TestE2E_SecureEnclave_Direct(t *testing.T) {
 	env := loadTestEnv(t)
 
-	if env.ProxyAddr == "" {
-		t.Fatal("testenv.json: proxy_addr is required for direct tests (to set up authorized keys)")
-	}
-
 	tag := env.SEKeyTag
 	if tag == "" {
 		tag = "com.example.sshcli.e2e.se.direct"
@@ -492,10 +324,6 @@ func TestE2E_SecureEnclave_Direct(t *testing.T) {
 
 func TestE2E_YubiKey_Direct(t *testing.T) {
 	env := loadTestEnv(t)
-
-	if env.ProxyAddr == "" {
-		t.Fatal("testenv.json: proxy_addr is required for direct tests (to set up authorized keys)")
-	}
 
 	slot := env.YubiKeySlot
 	if slot == "" {

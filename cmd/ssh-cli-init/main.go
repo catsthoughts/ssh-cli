@@ -285,7 +285,7 @@ func runGetCert(args []string) error {
 	if *username != "" && *password != "" {
 		token, err = oidcClient.AuthenticatePassword(context.Background(), *username, *password)
 	} else {
-		token, err = oidcClient.AuthenticateInteractive(context.Background())
+		token, err = oidcClient.Authenticate(context.Background())
 	}
 	if err != nil {
 		return fmt.Errorf("oidc authentication: %w", err)
