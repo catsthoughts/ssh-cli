@@ -474,59 +474,12 @@ ssh-cli-init create-cert
 
 ## Testing
 
-### Unit tests
-
 ```bash
-go test ./...
+go test ./...                                        # unit tests
+go test -v -tags e2e -timeout 120s ./e2e/            # E2E (requires docker)
 ```
 
-### E2E tests
-
-E2E tests spin up a full local environment (Keycloak, step-ca, sshd) via Docker Compose and verify the complete flow: key creation → OIDC auth → cert signing → SSH connection.
-
-**Start the environment:**
-
-```bash
-cd e2e
-docker compose up -d --wait
-```
-
-Services started:
-
-| Service | Address | Description |
-|---------|---------|-------------|
-| Keycloak | `http://127.0.0.1:8080` | OIDC identity provider |
-| step-ca | `https://127.0.0.1:443` | SSH certificate authority |
-| sshd | `127.0.0.1:2222` | Target SSH server (Alpine) |
-
-> **Note:** Add `127.0.0.1 keycloak` to `/etc/hosts` so the browser can follow Keycloak's device-flow redirect to `http://keycloak:8080/...`.
-
-**Setup testenv:**
-
-```bash
-cp e2e/testenv.json.example e2e/testenv.json
-# edit if needed — defaults work with the docker-compose environment
-```
-
-**Run:**
-
-```bash
-go test -v -tags e2e -timeout 120s ./e2e/
-```
-
-Tests covered:
-
-| Test | Description |
-|------|-------------|
-| `TestE2E_SecureEnclave_Direct` | SE key creation + direct SSH connection |
-| `TestE2E_YubiKey_Direct` | YubiKey key creation + direct SSH connection (skipped if no YubiKey) |
-| `TestE2E_YubiKey_SlotPreservation` | Verifies test keys don't overwrite slot 9a |
-
-**Tear down:**
-
-```bash
-docker compose down
-```
+See [TESTING.md](TESTING.md) for full E2E setup instructions.
 
 ## Notes
 
