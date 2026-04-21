@@ -121,9 +121,9 @@ func (c *Client) RequestSSHCertificate(ctx context.Context, token string, opts S
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	// step-ca возвращает сырой wire-формат сертификата в base64.
-	// Пробуем сначала ParseAuthorizedKey (текстовый authorized_keys формат),
-	// если не получается — декодируем base64 и используем ParsePublicKey.
+	// step-ca may return either an authorized_keys line or a raw wire-format
+	// certificate encoded as base64. Try ParseAuthorizedKey first; if that
+	// fails, decode the base64 and parse the wire format directly.
 	var sshCert *ssh.Certificate
 	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(result.Certificate))
 	if err == nil {

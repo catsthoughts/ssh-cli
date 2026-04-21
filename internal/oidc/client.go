@@ -67,15 +67,15 @@ func (c *Client) Authenticate(ctx context.Context) (token string, err error) {
 		return "", fmt.Errorf("device code request: %w", err)
 	}
 
-	// Используем verification_uri_complete из ответа сервера — он уже содержит
-	// user_code и правильный hostname (тот же, что использует Keycloak для кук).
-	// Если сервер не вернул verification_uri_complete, строим URL вручную из
-	// verification_uri (тоже из ответа, не из providerURL).
+	// Prefer verification_uri_complete from the server response — it already
+	// contains the user_code and the correct hostname (the same one Keycloak
+	// uses for session cookies). Fall back to verification_uri if the server
+	// did not return the complete URI.
 	authURL := deviceCode.VerificationURIComplete
 	if authURL == "" {
 		authURL = deviceCode.VerificationURI
 		if authURL == "" {
-			// Последний fallback — строим из providerURL
+			// Last resort: construct the URL from providerURL.
 			authURL = fmt.Sprintf("%s/protocol/openid-connect/auth/device", c.providerURL)
 		}
 		if deviceCode.UserCode != "" {
