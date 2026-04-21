@@ -78,7 +78,9 @@ func (a *ReadOnlyAgent) Extension(_, _ string) ([]byte, error) {
 func (a *ReadOnlyAgent) Signers() ([]ssh.Signer, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.signers, nil
+	out := make([]ssh.Signer, len(a.signers))
+	copy(out, a.signers)
+	return out, nil
 }
 
 func samePublicKey(a, b ssh.PublicKey) bool {

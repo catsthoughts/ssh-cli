@@ -481,6 +481,8 @@ go test -v -tags e2e -timeout 120s ./e2e/            # E2E (requires docker)
 
 See [TESTING.md](TESTING.md) for full E2E setup instructions.
 
+For a detailed walkthrough of certificate-based authentication — including step-ca, sshd, and Keycloak setup — see [CERTIFICATES.md](CERTIFICATES.md).
+
 ## Notes
 
 - Secure Enclave keys are ECDSA P-256 on macOS.

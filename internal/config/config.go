@@ -122,8 +122,9 @@ type CertificateConfig struct {
 }
 
 type StepCAConfig struct {
-	AuthorityID string `json:"authority_id"`
-	CAURL       string `json:"ca_url"`
+	AuthorityID    string `json:"authority_id"`
+	CAURL          string `json:"ca_url"`
+	SkipTLSVerify  bool   `json:"skip_tls_verify,omitempty"`
 }
 
 type OIDCConfig struct {

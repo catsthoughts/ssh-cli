@@ -201,35 +201,38 @@ func buildDirectHostKeyCallback(proxy config.ProxyConfig) ssh.HostKeyCallback {
 		return ssh.InsecureIgnoreHostKey()
 	}
 	if proxy.KnownHosts == "" {
-		return ssh.InsecureIgnoreHostKey()
+		return func(_ string, _ net.Addr, _ ssh.PublicKey) error {
+			return fmt.Errorf("host key verification failed: known_hosts path is not configured; " +
+				"set proxy.known_hosts or explicitly set proxy.host_key_policy to \"insecure\" to disable verification")
+		}
 	}
 	if policy == "" {
 		policy = "accept-new"
 	}
 
+	cb, initErr := knownhosts.New(proxy.KnownHosts)
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		cb, err := knownhosts.New(proxy.KnownHosts)
-		if err == nil {
-			verifyErr := cb(hostname, remote, key)
-			if verifyErr == nil {
-				return nil
-			}
-			var keyErr *knownhosts.KeyError
-			if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
+		if initErr != nil {
+			if policy == "accept-new" && os.IsNotExist(initErr) {
 				if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 					return fmt.Errorf("persist known host: %w", err)
 				}
 				return nil
 			}
-			return verifyErr
+			return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, initErr)
 		}
-		if policy == "accept-new" && os.IsNotExist(err) {
+		verifyErr := cb(hostname, remote, key)
+		if verifyErr == nil {
+			return nil
+		}
+		var keyErr *knownhosts.KeyError
+		if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
 			if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 				return fmt.Errorf("persist known host: %w", err)
 			}
 			return nil
 		}
-		return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, err)
+		return verifyErr
 	}
 }
 
@@ -302,7 +305,12 @@ func refreshCertificate(key *keychain.Key, cfg config.Config, keyTag, profile st
 	}
 	validForHours := parseDurationHours(validFor)
 
-	stepcaClient := stepca.NewClientSkipVerify(cfg.Certificate.StepCA.CAURL, cfg.Certificate.StepCA.AuthorityID)
+	var stepcaClient *stepca.Client
+	if cfg.Certificate.StepCA.SkipTLSVerify {
+		stepcaClient = stepca.NewClientSkipVerify(cfg.Certificate.StepCA.CAURL, cfg.Certificate.StepCA.AuthorityID)
+	} else {
+		stepcaClient = stepca.NewClient(cfg.Certificate.StepCA.CAURL, cfg.Certificate.StepCA.AuthorityID)
+	}
 	cert, err := stepcaClient.RequestSSHCertificate(context.Background(), token, stepca.SignOptions{
 		PublicKey:     key.SSHPublicKey(),
 		Identity:      cfg.Certificate.Identity,
@@ -336,35 +344,38 @@ func buildHostKeyCallback(proxy config.SingleProxy) ssh.HostKeyCallback {
 		return ssh.InsecureIgnoreHostKey()
 	}
 	if proxy.KnownHosts == "" {
-		return ssh.InsecureIgnoreHostKey()
+		return func(_ string, _ net.Addr, _ ssh.PublicKey) error {
+			return fmt.Errorf("host key verification failed: known_hosts path is not configured; " +
+				"set proxy.known_hosts or explicitly set proxy.host_key_policy to \"insecure\" to disable verification")
+		}
 	}
 	if policy == "" {
 		policy = "accept-new"
 	}
 
+	cb, initErr := knownhosts.New(proxy.KnownHosts)
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		cb, err := knownhosts.New(proxy.KnownHosts)
-		if err == nil {
-			verifyErr := cb(hostname, remote, key)
-			if verifyErr == nil {
-				return nil
-			}
-			var keyErr *knownhosts.KeyError
-			if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
+		if initErr != nil {
+			if policy == "accept-new" && os.IsNotExist(initErr) {
 				if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 					return fmt.Errorf("persist known host: %w", err)
 				}
 				return nil
 			}
-			return verifyErr
+			return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, initErr)
 		}
-		if policy == "accept-new" && os.IsNotExist(err) {
+		verifyErr := cb(hostname, remote, key)
+		if verifyErr == nil {
+			return nil
+		}
+		var keyErr *knownhosts.KeyError
+		if policy == "accept-new" && errors.As(verifyErr, &keyErr) && len(keyErr.Want) == 0 {
 			if err := appendKnownHost(proxy.KnownHosts, hostname, remote, key); err != nil {
 				return fmt.Errorf("persist known host: %w", err)
 			}
 			return nil
 		}
-		return fmt.Errorf("load known_hosts %s: %w", proxy.KnownHosts, err)
+		return verifyErr
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -23,6 +24,23 @@ func New(baseDir string) *Store {
 	return &Store{baseDir: baseDir}
 }
 
+// sanitizeProfile validates that a profile name does not escape baseDir.
+// Only path components without separators are allowed (e.g. "prod", "staging").
+// Multi-segment names like "nested/profile" are rejected to prevent traversal.
+func sanitizeProfile(profile string) error {
+	if profile == "" {
+		return fmt.Errorf("profile name must not be empty")
+	}
+	if strings.ContainsAny(profile, "/\\") {
+		return fmt.Errorf("profile name must not contain path separators: %q", profile)
+	}
+	clean := filepath.Clean(profile)
+	if clean == "." || clean == ".." {
+		return fmt.Errorf("invalid profile name: %q", profile)
+	}
+	return nil
+}
+
 func (s *Store) profileDir(profile string) string {
 	return filepath.Join(s.baseDir, profile)
 }
@@ -32,6 +50,9 @@ func (s *Store) certFilePath(profile string) string {
 }
 
 func (s *Store) CertPath(profile string) string {
+	if sanitizeProfile(profile) != nil {
+		return ""
+	}
 	return s.certFilePath(profile)
 }
 
@@ -40,6 +61,9 @@ func (s *Store) metadataPath(profile string) string {
 }
 
 func (s *Store) Save(profile string, cert *ssh.Certificate, keyTag string) error {
+	if err := sanitizeProfile(profile); err != nil {
+		return err
+	}
 	dir := s.profileDir(profile)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -67,6 +91,9 @@ func (s *Store) Save(profile string, cert *ssh.Certificate, keyTag string) error
 }
 
 func (s *Store) Load(profile string) (*ssh.Certificate, error) {
+	if err := sanitizeProfile(profile); err != nil {
+		return nil, err
+	}
 	certPath := s.certFilePath(profile)
 	data, err := os.ReadFile(certPath)
 	if err != nil {
@@ -87,6 +114,9 @@ func (s *Store) Load(profile string) (*ssh.Certificate, error) {
 }
 
 func (s *Store) Expiry(profile string) (time.Time, error) {
+	if err := sanitizeProfile(profile); err != nil {
+		return time.Time{}, err
+	}
 	metaPath := s.metadataPath(profile)
 	data, err := os.ReadFile(metaPath)
 	if err != nil {

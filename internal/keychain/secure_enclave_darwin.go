@@ -289,10 +289,13 @@ import (
 )
 
 // darwinBackend implements keyBackend for macOS Secure Enclave / Keychain.
+// keyRef and authCtx are stored as the concrete CGo types so that the CGo
+// pointer-passing rules are satisfied and go vet does not flag conversions
+// through unsafe.Pointer at assignment time.
 type darwinBackend struct {
 	mu      sync.Mutex
-	keyRef  unsafe.Pointer // SecKeyRef
-	authCtx unsafe.Pointer // LAContext (optional)
+	keyRef  C.SecKeyRef  // retained SecKeyRef; nil when closed
+	authCtx C.CFTypeRef  // optional LAContext; nil when not used or closed
 }
 
 func (b *darwinBackend) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([]byte, error) {
@@ -301,13 +304,13 @@ func (b *darwinBackend) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.keyRef == nil {
+	if b.keyRef == 0 {
 		return nil, errors.New("key has been closed")
 	}
 	var out *C.uchar
 	var outLen C.int
 	var cerr *C.char
-	if C.gosec_sign_with_keyref(C.SecKeyRef(b.keyRef), (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, C.CFTypeRef(b.authCtx), &cerr) == 0 {
+	if C.gosec_sign_with_keyref(b.keyRef, (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, b.authCtx, &cerr) == 0 {
 		return nil, cStringErr(cerr)
 	}
 	defer C.free(unsafe.Pointer(out))
@@ -317,13 +320,13 @@ func (b *darwinBackend) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([
 func (b *darwinBackend) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.keyRef != nil {
-		C.gosec_release_key(C.SecKeyRef(b.keyRef))
-		b.keyRef = nil
+	if b.keyRef != 0 {
+		C.gosec_release_key(b.keyRef)
+		b.keyRef = 0
 	}
-	if b.authCtx != nil {
-		C.sshcli_release_auth_context(C.CFTypeRef(b.authCtx))
-		b.authCtx = nil
+	if b.authCtx != 0 {
+		C.sshcli_release_auth_context(b.authCtx)
+		b.authCtx = 0
 	}
 }
 
@@ -389,8 +392,8 @@ func ensureKey(cfg config.KeyConfig, useAccessControl bool) (*ecdsa.PublicKey, *
 	}
 
 	backend := &darwinBackend{
-		keyRef:  unsafe.Pointer(cKeyRef),
-		authCtx: unsafe.Pointer(cAuthCtx),
+		keyRef:  cKeyRef,
+		authCtx: cAuthCtx,
 	}
 	return pub, backend, status == 2, nil
 }

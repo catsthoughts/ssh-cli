@@ -35,6 +35,10 @@ func CreateSSHUserCertificate(cfg config.Config, key *keychain.Key) (string, err
 	if validFor <= 0 {
 		validFor = 8 * time.Hour
 	}
+	serialBig, err := rand.Int(rand.Reader, new(big.Int).SetUint64(^uint64(0)))
+	if err != nil {
+		return "", fmt.Errorf("generate serial: %w", err)
+	}
 	principals := cfg.Certificate.Principals
 	if len(principals) == 0 && cfg.Proxy.User != "" {
 		principals = []string{cfg.Proxy.User}
@@ -45,7 +49,7 @@ func CreateSSHUserCertificate(cfg config.Config, key *keychain.Key) (string, err
 	}
 	cert := &ssh.Certificate{
 		Key:             key.SSHPublicKey(),
-		Serial:          uint64(time.Now().UnixNano()),
+		Serial:          serialBig.Uint64(),
 		CertType:        ssh.UserCert,
 		KeyId:           identity,
 		ValidPrincipals: principals,

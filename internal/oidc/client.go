@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,9 +109,11 @@ func (c *Client) AuthenticateInteractive(ctx context.Context) (token string, err
 	redirectURI := "http://localhost:9876/callback"
 	state := generateState()
 	codeChan := make(chan authCodeResponse, 1)
+	serverErrChan := make(chan error, 1)
 
-	server := &http.Server{Addr: "localhost:9876", Handler: nil}
-	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	server := &http.Server{Addr: "localhost:9876", Handler: mux}
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		returnedState := r.URL.Query().Get("state")
 		if returnedState != state {
@@ -126,7 +129,11 @@ func (c *Client) AuthenticateInteractive(ctx context.Context) (token string, err
 		codeChan <- authCodeResponse{code: code, state: state}
 	})
 
-	go server.ListenAndServe()
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrChan <- err
+		}
+	}()
 	defer server.Shutdown(context.Background())
 
 	authURL := c.buildAuthURL(state, redirectURI)
@@ -138,7 +145,9 @@ func (c *Client) AuthenticateInteractive(ctx context.Context) (token string, err
 		if result.err != nil {
 			return "", result.err
 		}
-		return c.exchangeCode(result.code, redirectURI)
+		return c.exchangeCode(ctx, result.code, redirectURI)
+	case srvErr := <-serverErrChan:
+		return "", fmt.Errorf("callback server failed to start: %w", srvErr)
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -154,7 +163,7 @@ func (c *Client) buildAuthURL(state, redirectURI string) string {
 	return c.providerURL + "/protocol/openid-connect/auth?" + params.Encode()
 }
 
-func (c *Client) exchangeCode(code, redirectURI string) (string, error) {
+func (c *Client) exchangeCode(ctx context.Context, code, redirectURI string) (string, error) {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("client_id", c.clientID)
@@ -162,7 +171,7 @@ func (c *Client) exchangeCode(code, redirectURI string) (string, error) {
 	data.Set("code", code)
 	data.Set("redirect_uri", redirectURI)
 
-	req, err := http.NewRequest(http.MethodPost, c.providerURL+"/protocol/openid-connect/token", strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.providerURL+"/protocol/openid-connect/token", strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -294,7 +303,11 @@ func (c *Client) pollForToken(ctx context.Context, deviceCode string, interval, 
 			return token, nil
 		}
 
-		time.Sleep(time.Duration(interval) * time.Second)
+		select {
+		case <-time.After(time.Duration(interval) * time.Second):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 }
 
@@ -335,7 +348,11 @@ func (c *Client) requestToken(ctx context.Context, deviceCode string) (string, e
 		return "", nil
 	}
 	if tr.Error == "slow_down" {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 		return "", nil
 	}
 	if tr.Error != "" {

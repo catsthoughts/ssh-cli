@@ -202,14 +202,30 @@ func TestStore_Save_CreatesDirectory(t *testing.T) {
 	pubKey := testPublicKey(t)
 	cert := createTestCert(t, pubKey, "user", []string{"user"}, 8*time.Hour)
 
-	err := s.Save("nested/profile", cert, "key-tag")
+	err := s.Save("myprofile", cert, "key-tag")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	profileDir := filepath.Join(tmpDir, "nested", "profile")
+	profileDir := filepath.Join(tmpDir, "myprofile")
 	if _, err := os.Stat(profileDir); err != nil {
 		t.Errorf("profile directory not created: %v", err)
+	}
+}
+
+func TestStore_Save_RejectsPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	pubKey := testPublicKey(t)
+	cert := createTestCert(t, pubKey, "user", []string{"user"}, 8*time.Hour)
+
+	cases := []string{"../escape", "nested/profile", ".."}
+	for _, profile := range cases {
+		err := s.Save(profile, cert, "key-tag")
+		if err == nil {
+			t.Errorf("expected error for profile %q, got nil", profile)
+		}
 	}
 }
 
