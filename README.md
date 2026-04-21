@@ -1,6 +1,6 @@
 # SSH CLI
 
-A Go-based SSH client that uses non-exportable private keys stored in the macOS Secure Enclave, macOS Keychain, or a YubiKey PIV smart card. Designed to integrate with [ssh-proxy-server](https://github.com/catsthoughts/ssh-proxy-server) for certificate-based authentication.
+A cross-platform SSH client (macOS, Linux, Windows) that uses non-exportable private keys stored in secure hardware (YubiKey PIV, macOS Keychain, or Secure Enclave). Designed to integrate with [ssh-proxy-server](https://github.com/catsthoughts/ssh-proxy-server) for certificate-based authentication.
 
 ---
 
