@@ -1,5 +1,6 @@
 /ssh-cli
 /ssh-cli-init
+AGENTS.md
 *.log
 *.pem
 *.csr
