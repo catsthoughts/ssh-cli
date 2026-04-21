@@ -11,5 +11,15 @@
   "se_key_tag":              "com.example.sshcli.e2e.se.test",
   "se_key_label":            "ssh-cli e2e test SE key",
 
-  "yubikey_slot":            "9d"
+  "yubikey_slot":            "9d",
+
+  "stepca_url":              "https://127.0.0.1:443",
+  "stepca_authority_id":     "oidc-provisioner",
+  "keycloak_url":            "http://127.0.0.1:8080",
+  "oidc_client_id":          "ssh-cli",
+  "oidc_client_secret":      "secret",
+  "sshd_host":               "127.0.0.1",
+  "sshd_port":               "2222",
+  "test_user":               "testuser",
+  "test_password":           "password"
 }

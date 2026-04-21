@@ -222,31 +222,47 @@ static int gosec_delete_key(const char *tag, char **errOut) {
 	return 1;
 }
 
-static int gosec_sign_with_keyref(SecKeyRef key, const unsigned char *digest, int digestLen, unsigned char **outBytes, int *outLen, char **errOut) {
+static int gosec_sign_with_keyref(SecKeyRef key, const unsigned char *digest, int digestLen, unsigned char **outBytes, int *outLen, CFTypeRef authCtx, char **errOut) {
 	if (!key) {
 		*errOut = strdup("private key ref is nil");
 		return 0;
 	}
 
-	CFDataRef digestData = CFDataCreate(kCFAllocatorDefault, digest, digestLen);
-	if (!SecKeyIsAlgorithmSupported(key, kSecKeyOperationTypeSign, kSecKeyAlgorithmECDSASignatureDigestX962SHA256)) {
+	SecKeyRef signKey = NULL;
+	if (authCtx) {
+		CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+		CFDictionarySetValue(query, kSecClass, kSecClassKey);
+		CFDictionarySetValue(query, kSecAttrKeyClass, kSecAttrKeyClassPrivate);
+		CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
+		CFDictionarySetValue(query, kSecUseAuthenticationContext, authCtx);
+		CFDictionarySetValue(query, kSecValueRef, key);
+		SecItemCopyMatching(query, (CFTypeRef *)&signKey);
+		CFRelease(query);
+	}
+	if (!signKey) {
+		signKey = key;
+	}
+
+	CFDataRef digestData = CFDataCreate(kCFAllocatorDefault, digest, (CFIndex)digestLen);
+	if (!SecKeyIsAlgorithmSupported(signKey, kSecKeyOperationTypeSign, kSecKeyAlgorithmECDSASignatureDigestX962SHA256)) {
 		*errOut = strdup("sha256 signing not supported for this key");
 		CFRelease(digestData);
+		if (signKey != key) CFRelease(signKey);
 		return 0;
 	}
 
 	CFErrorRef err = NULL;
-	CFDataRef sig = SecKeyCreateSignature(key, kSecKeyAlgorithmECDSASignatureDigestX962SHA256, digestData, &err);
+	CFDataRef sig = SecKeyCreateSignature(signKey, kSecKeyAlgorithmECDSASignatureDigestX962SHA256, digestData, &err);
+	CFRelease(digestData);
+	if (signKey != key) CFRelease(signKey);
 	if (!sig) {
 		*errOut = cferror_to_cstr(err);
 		if (err) CFRelease(err);
-		CFRelease(digestData);
 		return 0;
 	}
 
 	int ok = copy_cfdata(sig, outBytes, outLen, errOut);
 	CFRelease(sig);
-	CFRelease(digestData);
 	return ok;
 }
 
@@ -291,7 +307,7 @@ func (b *darwinBackend) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([
 	var out *C.uchar
 	var outLen C.int
 	var cerr *C.char
-	if C.gosec_sign_with_keyref(C.SecKeyRef(b.keyRef), (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, &cerr) == 0 {
+	if C.gosec_sign_with_keyref(C.SecKeyRef(b.keyRef), (*C.uchar)(unsafe.Pointer(&digest[0])), C.int(len(digest)), &out, &outLen, C.CFTypeRef(b.authCtx), &cerr) == 0 {
 		return nil, cStringErr(cerr)
 	}
 	defer C.free(unsafe.Pointer(out))

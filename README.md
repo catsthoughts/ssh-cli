@@ -238,25 +238,57 @@ By default, Ctrl+C in a raw-mode session is sent directly to the remote side. En
 
 ## Certificate modes
 
-### SSH user certificate
+### Auto-refresh via step-ca (recommended)
 
-Provide a CA private key path in the config:
+The client integrates with [Smallstep step-ca](https://smallstep.com/docs/step-ca/) to automatically obtain and refresh SSH user certificates. On every `ssh-cli` invocation the stored certificate is checked; if it is missing or expires within `cert_refresh_before` (default `1h`), a new one is requested via OIDC device flow before connecting.
 
 ```json
 {
   "certificate": {
-    "type": "ssh-user",
-    "ca_key_path": "./ssh_user_ca",
-    "output_path": "./id_secure_enclave-cert.pub",
-    "auth_cert_path": "./id_secure_enclave-cert.pub",
-    "identity": "your-user",
-    "principals": ["your-user"],
-    "valid_for": "8h"
+    "identity":            "your-user",
+    "principals":          ["your-user"],
+    "valid_for":           "8h",
+    "cert_refresh_before": "1h",
+    "step_ca": {
+      "ca_url":       "https://ca.example.com",
+      "authority_id": "oidc-provisioner"
+    },
+    "oidc": {
+      "provider_url":  "https://sso.example.com/realms/ssh",
+      "client_id":     "ssh-cli",
+      "client_secret": "secret",
+      "scope":         "openid profile email"
+    }
   }
 }
 ```
 
-Generate it:
+Certificates are cached in `~/.ssh-cli/certs/<profile>/` and reused across invocations until they expire.
+
+Obtain a certificate manually (useful for enrolling a new key or testing):
+
+```bash
+ssh-cli-init get-cert
+ssh-cli-init get-cert -profile staging
+```
+
+### SSH user certificate (local CA)
+
+Sign a certificate locally with a CA key on disk:
+
+```json
+{
+  "certificate": {
+    "type":          "ssh-user",
+    "ca_key_path":   "./ssh_user_ca",
+    "output_path":   "./id_secure_enclave-cert.pub",
+    "auth_cert_path":"./id_secure_enclave-cert.pub",
+    "identity":      "your-user",
+    "principals":    ["your-user"],
+    "valid_for":     "8h"
+  }
+}
+```
 
 ```bash
 ssh-cli-init create-cert
@@ -267,8 +299,8 @@ ssh-cli-init create-cert
 ```json
 {
   "certificate": {
-    "type": "x509-csr",
-    "output_path": "./client.csr",
+    "type":                "x509-csr",
+    "output_path":         "./client.csr",
     "subject_common_name": "your-user"
   }
 }
@@ -279,8 +311,8 @@ ssh-cli-init create-cert
 ```json
 {
   "certificate": {
-    "type": "x509-selfsigned",
-    "output_path": "./client.crt",
+    "type":                "x509-selfsigned",
+    "output_path":         "./client.crt",
     "subject_common_name": "your-user"
   }
 }
@@ -288,7 +320,7 @@ ssh-cli-init create-cert
 
 ## Full config reference
 
-### Secure Enclave
+### Proxy via step-ca (Secure Enclave)
 
 ```json
 {
@@ -301,7 +333,7 @@ ssh-cli-init create-cert
   },
   "proxy": {
     "address":                 ["proxy-1.example.com:2222", "proxy-2.example.com:2222"],
-    "user":                    "",
+    "user":                    "your-user",
     "known_hosts":             "~/.ssh/known_hosts",
     "host_key_policy":         "accept-new",
     "insecure_ignore_hostkey": false,
@@ -317,19 +349,25 @@ ssh-cli-init create-cert
     "forward_ctrl_c": false
   },
   "certificate": {
-    "type":                "ssh-user",
-    "ca_key_path":         "",
-    "output_path":         "~/.ssh-cli/id_prod-cert.pub",
-    "auth_cert_path":      "",
     "identity":            "your-user",
     "principals":          ["your-user"],
     "valid_for":           "8h",
-    "subject_common_name": "your-user"
+    "cert_refresh_before": "1h",
+    "step_ca": {
+      "ca_url":       "https://ca.example.com",
+      "authority_id": "oidc-provisioner"
+    },
+    "oidc": {
+      "provider_url":  "https://sso.example.com/realms/ssh",
+      "client_id":     "ssh-cli",
+      "client_secret": "secret",
+      "scope":         "openid profile email"
+    }
   }
 }
 ```
 
-### YubiKey PIV
+### Proxy via step-ca (YubiKey PIV)
 
 ```json
 {
@@ -345,7 +383,7 @@ ssh-cli-init create-cert
   },
   "proxy": {
     "address":                 "proxy.example.com:2222",
-    "user":                    "",
+    "user":                    "your-user",
     "known_hosts":             "~/.ssh/known_hosts",
     "host_key_policy":         "accept-new",
     "insecure_ignore_hostkey": false,
@@ -361,14 +399,20 @@ ssh-cli-init create-cert
     "forward_ctrl_c": false
   },
   "certificate": {
-    "type":                "ssh-user",
-    "ca_key_path":         "",
-    "output_path":         "~/.ssh-cli/id_prod-cert.pub",
-    "auth_cert_path":      "",
     "identity":            "your-user",
     "principals":          ["your-user"],
     "valid_for":           "8h",
-    "subject_common_name": "your-user"
+    "cert_refresh_before": "1h",
+    "step_ca": {
+      "ca_url":       "https://ca.example.com",
+      "authority_id": "oidc-provisioner"
+    },
+    "oidc": {
+      "provider_url":  "https://sso.example.com/realms/ssh",
+      "client_id":     "ssh-cli",
+      "client_secret": "secret",
+      "scope":         "openid profile email"
+    }
   }
 }
 ```
@@ -379,15 +423,15 @@ ssh-cli-init create-cert
 {
   "key": {
     "tag":             "com.example.sshcli.direct",
-    "label":           "Direct Connection Key (Secure Enclave)",
+    "label":           "Direct Connection Key",
     "comment":         "direct@mac",
     "key_source":      "secure_enclave",
     "public_key_path": "~/.ssh-cli/id_direct.pub"
   },
   "proxy": {
-    "use_proxy":              false,
-    "user":                   "your-user",
-    "known_hosts":            "~/.ssh/known_hosts",
+    "use_proxy":               false,
+    "user":                    "your-user",
+    "known_hosts":             "~/.ssh/known_hosts",
     "host_key_policy":         "accept-new",
     "connect_timeout_seconds": 10
   },
@@ -414,9 +458,9 @@ ssh-cli-init create-cert
     }
   },
   "proxy": {
-    "use_proxy":              false,
-    "user":                   "your-user",
-    "known_hosts":            "~/.ssh/known_hosts",
+    "use_proxy":               false,
+    "user":                    "your-user",
+    "known_hosts":             "~/.ssh/known_hosts",
     "host_key_policy":         "accept-new",
     "connect_timeout_seconds": 10
   },
@@ -438,18 +482,30 @@ go test ./...
 
 ### E2E tests
 
-E2E tests connect to a real SSH proxy (ssh-proxy-server) and target host to verify the full flow.
+E2E tests spin up a full local environment (Keycloak, step-ca, sshd) via Docker Compose and verify the complete flow: key creation → OIDC auth → cert signing → SSH connection.
 
-**Prerequisites:**
-- ssh-proxy-server listening on `127.0.0.1:2222`
-- SSH agent running (`SSH_AUTH_SOCK` set) or `target_direct_password` in testenv.json
-- Public key authorized on the target host
+**Start the environment:**
 
-**Setup:**
+```bash
+cd e2e
+docker compose up -d --wait
+```
+
+Services started:
+
+| Service | Address | Description |
+|---------|---------|-------------|
+| Keycloak | `http://127.0.0.1:8080` | OIDC identity provider |
+| step-ca | `https://127.0.0.1:443` | SSH certificate authority |
+| sshd | `127.0.0.1:2222` | Target SSH server (Alpine) |
+
+> **Note:** Add `127.0.0.1 keycloak` to `/etc/hosts` so the browser can follow Keycloak's device-flow redirect to `http://keycloak:8080/...`.
+
+**Setup testenv:**
 
 ```bash
 cp e2e/testenv.json.example e2e/testenv.json
-# edit e2e/testenv.json with your credentials
+# edit if needed — defaults work with the docker-compose environment
 ```
 
 **Run:**
@@ -459,10 +515,18 @@ go test -v -tags e2e -timeout 120s ./e2e/
 ```
 
 Tests covered:
-- `TestE2E_SecureEnclave` — key creation, proxy connection via SE
-- `TestE2E_YubiKey` — key creation, proxy connection via YubiKey
-- `TestE2E_SecureEnclave_Direct` — direct connection via SE (no proxy)
-- `TestE2E_YubiKey_Direct` — direct connection via YubiKey (no proxy)
+
+| Test | Description |
+|------|-------------|
+| `TestE2E_SecureEnclave_Direct` | SE key creation + direct SSH connection |
+| `TestE2E_YubiKey_Direct` | YubiKey key creation + direct SSH connection (skipped if no YubiKey) |
+| `TestE2E_YubiKey_SlotPreservation` | Verifies test keys don't overwrite slot 9a |
+
+**Tear down:**
+
+```bash
+docker compose down
+```
 
 ## Notes
 

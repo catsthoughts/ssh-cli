@@ -10,3 +10,15 @@ config.json
 
 # e2e test credentials — never commit real values
 e2e/testenv.json
+
+# e2e: CA private keys and JWK secrets — never commit
+e2e/docker/step-ca/secrets/
+e2e/docker/secrets/
+
+# e2e: runtime / generated files — recreated by docker compose up
+e2e/docker/step-ca/db/
+e2e/docker/step-ca/certs/
+e2e/docker/sshd/authorized_keys
+e2e/docker/sshd/ssh_user_key.pub
+e2e/docker/sshd/sshd_config
+e2e/docker/step-ca/password

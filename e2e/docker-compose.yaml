@@ -1,0 +1,112 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      # Keycloak v2 hostname API: фиксируем issuer на http://keycloak:8080 —
+      # именно этот URL использует step-ca в configurationEndpoint (Docker DNS).
+      # CLI с хоста достучится через 127.0.0.1:8080 (port-forward), токены
+      # получат iss=http://keycloak:8080/realms/ssh — step-ca их примет.
+      # keycloak:8080 — фиксированный issuer для step-ca (Docker DNS).
+      # Браузер с хоста: нужна запись в /etc/hosts: 127.0.0.1 keycloak
+      KC_HOSTNAME: "http://keycloak:8080"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+    volumes:
+      - ./docker/realms.json:/opt/keycloak/data/import/realms.json
+    ports:
+      - "8080:8080"
+    networks:
+      - ssh-cli-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /realms/ssh/.well-known/openid-configuration HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q 'issuer' <&3"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+
+  step-ca:
+    image: smallstep/step-ca:latest
+    volumes:
+      - ./docker/step-ca:/home/step
+    command: step-ca --password-file=/home/step/password /home/step/config/ca.json
+    ports:
+      - "443:443"
+    networks:
+      - ssh-cli-net
+    restart: unless-stopped
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "step ca health --ca-url https://127.0.0.1:443 --root /home/step/certs/root_ca.crt 2>/dev/null | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  init:
+    image: smallstep/step-ca:latest
+    volumes:
+      - ./docker/step-ca:/output
+      - ./docker/sshd:/sshd_output
+    depends_on:
+      step-ca:
+        condition: service_started
+    entrypoint: []
+    command: |
+      /bin/sh -c 'set -e
+      echo "Waiting for step-ca to be ready..."
+      until curl -sk https://step-ca:443/health > /dev/null 2>&1; do sleep 5; done
+      echo "Extracting SSH user CA public key..."
+      cp /output/certs/ssh_user_ca_key.pub /output/certs/ssh_user_key.pub
+      cp /output/certs/ssh_user_ca_key.pub /sshd_output/ssh_user_key.pub
+      chmod 644 /sshd_output/ssh_user_key.pub
+      echo "CA pubkey extracted"'
+    networks:
+      - ssh-cli-net
+
+  sshd:
+    image: alpine:latest
+    hostname: target-host
+    volumes:
+      - ./docker/sshd/ssh_user_key.pub:/data/trusted_user_ca.pub:ro
+    command: >
+      sh -c '
+        set -e
+        apk add --no-cache openssh-server
+        id -u testuser &>/dev/null || adduser -D -u 1000 -s /bin/sh testuser || true
+        echo "testuser:password" | chpasswd
+        mkdir -p /run/sshd /home/testuser /var/empty /home/testuser/.ssh
+        touch /home/testuser/.ssh/authorized_keys
+        chmod 700 /home/testuser/.ssh
+        chmod 600 /home/testuser/.ssh/authorized_keys
+        chown -R testuser:testuser /home/testuser/.ssh
+        if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""; fi
+        chmod 0600 /etc/ssh/ssh_host_ed25519_key
+        chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+        echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+        echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+        echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+        echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config
+        echo "UsePAM no" >> /etc/ssh/sshd_config
+        echo "AllowUsers testuser" >> /etc/ssh/sshd_config
+        echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config
+        echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
+        echo "TrustedUserCAKeys /data/trusted_user_ca.pub" >> /etc/ssh/sshd_config
+        /usr/sbin/sshd -D -e
+      '
+    ports:
+      - "2222:22"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    networks:
+      - ssh-cli-net
+
+networks:
+  ssh-cli-net:
+    driver: bridge

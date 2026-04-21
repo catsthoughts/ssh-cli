@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"ssh-cli/internal/certstore"
 	"ssh-cli/internal/certutil"
 	"ssh-cli/internal/config"
 	"ssh-cli/internal/keychain"
+	"ssh-cli/internal/oidc"
+	"ssh-cli/internal/stepca"
 )
 
 func main() {
@@ -38,6 +46,8 @@ func run(args []string) error {
 		return runShowPublicKey(args[1:])
 	case "create-cert":
 		return runCreateCert(args[1:])
+	case "get-cert":
+		return runGetCert(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -228,6 +238,108 @@ func runCreateCert(args []string) error {
 	}
 }
 
+func runGetCert(args []string) error {
+	fs := flag.NewFlagSet("get-cert", flag.ExitOnError)
+	profileName := fs.String("profile", "", "profile name in multi-profile config")
+	configPath := fs.String("config", config.MustDefaultConfigPath(), "path to JSON config")
+	username := fs.String("username", "", "OIDC username (for password grant)")
+	password := fs.String("password", "", "OIDC password (for password grant)")
+	fs.Parse(args)
+
+	profile := *profileName
+	if profile == "" {
+		cfg, err := config.Load(*configPath)
+		if err == nil {
+			profile = cfg.Profile
+		}
+	}
+
+	cfg, err := config.LoadProfile(*configPath, profile)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
+	if cfg.Certificate.StepCA.CAURL == "" {
+		return fmt.Errorf("step_ca.ca_url is required for get-cert")
+	}
+	if cfg.Certificate.OIDC.ProviderURL == "" {
+		return fmt.Errorf("oidc.provider_url is required for get-cert")
+	}
+	if cfg.Certificate.OIDC.ClientID == "" {
+		return fmt.Errorf("oidc.client_id is required for get-cert")
+	}
+
+	key, _, err := keychain.EnsureKey(cfg.Key)
+	if err != nil {
+		return fmt.Errorf("ensure key: %w", err)
+	}
+	defer key.Close()
+
+	fmt.Fprintf(os.Stderr, "Authenticating via %s...\n", cfg.Certificate.OIDC.ProviderURL)
+	oidcClient := oidc.NewClient(cfg.Certificate.OIDC.ProviderURL, cfg.Certificate.OIDC.ClientID, cfg.Certificate.OIDC.ClientSecret, cfg.Certificate.OIDC.Scope)
+
+	var token string
+	if *username != "" && *password != "" {
+		token, err = oidcClient.AuthenticatePassword(context.Background(), *username, *password)
+	} else {
+		token, err = oidcClient.AuthenticateInteractive(context.Background())
+	}
+	if err != nil {
+		return fmt.Errorf("oidc authentication: %w", err)
+	}
+
+	validFor := cfg.Certificate.ValidFor
+	if validFor == "" {
+		validFor = "8h"
+	}
+	validForHours := parseHours(validFor)
+
+	stepcaClient := stepca.NewClient(cfg.Certificate.StepCA.CAURL, cfg.Certificate.StepCA.AuthorityID)
+	cert, err := stepcaClient.RequestSSHCertificate(context.Background(), token, stepca.SignOptions{
+		PublicKey:     key.SSHPublicKey(),
+		Identity:      cfg.Certificate.Identity,
+		Principals:    cfg.Certificate.Principals,
+		ValidForHours:  validForHours,
+	})
+	if err != nil {
+		return fmt.Errorf("request certificate: %w", err)
+	}
+
+	certDir := certstoreDir()
+	store := certstore.New(certDir)
+	if err := store.Save(profile, cert, cfg.Key.Tag); err != nil {
+		return fmt.Errorf("save certificate: %w", err)
+	}
+
+	certPath := store.CertPath(profile)
+	expiryTime := time.Unix(int64(cert.ValidBefore), 0)
+	fmt.Printf("Certificate saved to %s\n", certPath)
+	fmt.Printf("Valid for %s (expires at %s)\n", validFor, expiryTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("\nAdd this to your ~/.ssh/known_hosts to trust this cert:\n")
+	fmt.Printf("@cert-authority * %s\n", string(ssh.MarshalAuthorizedKey(cert)))
+
+	return nil
+}
+
+func certstoreDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".ssh-cli/certs"
+	}
+	return filepath.Join(home, ".ssh-cli", "certs")
+}
+
+func parseHours(duration string) int {
+	d, err := time.ParseDuration(duration)
+	if err != nil {
+		return 8
+	}
+	return int(d.Hours())
+}
+
 func printUsage() {
 	fmt.Print(`ssh-cli-init - initialization and certificate management for ssh-cli
 
@@ -237,9 +349,10 @@ Commands:
   use-profile      Set the active profile
   create-key       Create or load a non-exportable key and save the public key; use -force to replace existing
   show-public-key  Show the SSH public key
-  create-cert      Create an SSH certificate, X.509 CSR, or self-signed X.509 cert
+  create-cert      Create an SSH certificate, X.509 CSR, or self-signed X.509 cert (local CA)
+  get-cert         Obtain an SSH certificate via step-ca and Keycloak OIDC
 
-Flags (for create-key, show-public-key, create-cert):
+Flags (for create-key, show-public-key, create-cert, get-cert):
   -config   path to JSON config (default: ~/.ssh-cli/config.json)
   -profile  profile name in multi-profile config (default: active_profile)
 
@@ -253,6 +366,7 @@ Examples:
   ssh-cli-init create-key -profile staging
   ssh-cli-init show-public-key -profile prod
   ssh-cli-init create-cert -profile prod
+  ssh-cli-init get-cert -profile prod
 
 Default config path:
   ~/.ssh-cli/config.json

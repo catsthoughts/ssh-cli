@@ -108,14 +108,29 @@ type TargetConfig struct {
 }
 
 type CertificateConfig struct {
-	Type              string   `json:"type"`
-	CAKeyPath         string   `json:"ca_key_path"`
-	OutputPath        string   `json:"output_path"`
-	AuthCertPath      string   `json:"auth_cert_path"`
-	Identity          string   `json:"identity"`
-	Principals        []string `json:"principals"`
-	ValidFor          string   `json:"valid_for"`
-	SubjectCommonName string   `json:"subject_common_name"`
+	Type               string        `json:"type"`
+	CAKeyPath          string        `json:"ca_key_path"`
+	OutputPath         string        `json:"output_path"`
+	AuthCertPath       string        `json:"auth_cert_path"`
+	Identity           string        `json:"identity"`
+	Principals         []string      `json:"principals"`
+	ValidFor           string        `json:"valid_for"`
+	SubjectCommonName  string        `json:"subject_common_name"`
+	StepCA             StepCAConfig  `json:"step_ca,omitempty"`
+	OIDC               OIDCConfig    `json:"oidc,omitempty"`
+	CertRefreshBefore  string        `json:"cert_refresh_before,omitempty"`
+}
+
+type StepCAConfig struct {
+	AuthorityID string `json:"authority_id"`
+	CAURL       string `json:"ca_url"`
+}
+
+type OIDCConfig struct {
+	ProviderURL  string `json:"provider_url"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	Scope        string `json:"scope"`
 }
 
 func Default() Config {
@@ -149,6 +164,10 @@ func Default() Config {
 			Principals:        []string{currentUser},
 			ValidFor:          "8h",
 			SubjectCommonName: currentUser,
+			CertRefreshBefore: "1h",
+			OIDC: OIDCConfig{
+				Scope: "openid profile email",
+			},
 		},
 	}
 }
@@ -307,6 +326,13 @@ func (c *Config) normalize(basePath string) {
 	// YubiKey defaults
 	if c.Key.KeySource == "yubikey_piv" && c.Key.YubiKey.Slot == "" {
 		c.Key.YubiKey.Slot = "9a"
+	}
+	// OIDC defaults
+	if strings.TrimSpace(c.Certificate.OIDC.Scope) == "" {
+		c.Certificate.OIDC.Scope = "openid profile email"
+	}
+	if strings.TrimSpace(c.Certificate.CertRefreshBefore) == "" {
+		c.Certificate.CertRefreshBefore = "1h"
 	}
 }
 

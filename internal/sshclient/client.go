@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,14 +14,17 @@ import (
 	"sync"
 	"time"
 
-	agentutil "ssh-cli/internal/agent"
-	"ssh-cli/internal/config"
-	"ssh-cli/internal/keychain"
-
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/term"
+
+	agentutil "ssh-cli/internal/agent"
+	"ssh-cli/internal/certstore"
+	"ssh-cli/internal/config"
+	"ssh-cli/internal/keychain"
+	"ssh-cli/internal/oidc"
+	"ssh-cli/internal/stepca"
 )
 
 func Connect(cfg config.Config, route string) error {
@@ -31,7 +35,7 @@ func Connect(cfg config.Config, route string) error {
 	}
 	defer key.Close()
 	baseSigner := key.SSHSigner()
-	authSigner, err := maybeWrapWithCert(baseSigner, cfg.Certificate.AuthCertPath)
+	authSigner, err := maybeWrapWithCert(baseSigner, key, cfg, cfg.Key.Tag, cfg.Profile)
 	if err != nil {
 		return err
 	}
@@ -229,7 +233,36 @@ func buildDirectHostKeyCallback(proxy config.ProxyConfig) ssh.HostKeyCallback {
 	}
 }
 
-func maybeWrapWithCert(base ssh.Signer, path string) (ssh.Signer, error) {
+func maybeWrapWithCert(base ssh.Signer, key *keychain.Key, cfg config.Config, keyTag, profile string) (ssh.Signer, error) {
+	if cfg.Certificate.StepCA.CAURL != "" {
+		return maybeWrapWithCertFromStepCA(base, key, cfg, keyTag, profile)
+	}
+	return maybeWrapWithCertFromPath(base, cfg.Certificate.AuthCertPath)
+}
+
+func maybeWrapWithCertFromStepCA(base ssh.Signer, key *keychain.Key, cfg config.Config, keyTag, profile string) (ssh.Signer, error) {
+	certDir := defaultCertStoreDir()
+	store := certstore.New(certDir)
+
+	refreshBefore := time.Hour
+	if cfg.Certificate.CertRefreshBefore != "" {
+		if d, err := time.ParseDuration(cfg.Certificate.CertRefreshBefore); err == nil {
+			refreshBefore = d
+		}
+	}
+
+	if store.NeedsRefresh(profile, refreshBefore) {
+		fmt.Fprintf(os.Stderr, "Certificate expired or expiring soon, refreshing via step-ca...\n")
+		if err := refreshCertificate(key, cfg, keyTag, profile); err != nil {
+			return nil, fmt.Errorf("cert refresh: %w", err)
+		}
+	}
+
+	certPath := store.CertPath(profile)
+	return maybeWrapWithCertFromPath(base, certPath)
+}
+
+func maybeWrapWithCertFromPath(base ssh.Signer, path string) (ssh.Signer, error) {
 	if path == "" {
 		return base, nil
 	}
@@ -246,6 +279,55 @@ func maybeWrapWithCert(base ssh.Signer, path string) (ssh.Signer, error) {
 		return nil, fmt.Errorf("auth_cert_path must contain an SSH certificate")
 	}
 	return ssh.NewCertSigner(cert, base)
+}
+
+func defaultCertStoreDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".ssh-cli/certs"
+	}
+	return filepath.Join(home, ".ssh-cli", "certs")
+}
+
+func refreshCertificate(key *keychain.Key, cfg config.Config, keyTag, profile string) error {
+	oidcClient := oidc.NewClient(cfg.Certificate.OIDC.ProviderURL, cfg.Certificate.OIDC.ClientID, cfg.Certificate.OIDC.ClientSecret, cfg.Certificate.OIDC.Scope)
+	token, err := oidcClient.Authenticate(context.Background())
+	if err != nil {
+		return fmt.Errorf("oidc authentication: %w", err)
+	}
+
+	validFor := cfg.Certificate.ValidFor
+	if validFor == "" {
+		validFor = "8h"
+	}
+	validForHours := parseDurationHours(validFor)
+
+	stepcaClient := stepca.NewClientSkipVerify(cfg.Certificate.StepCA.CAURL, cfg.Certificate.StepCA.AuthorityID)
+	cert, err := stepcaClient.RequestSSHCertificate(context.Background(), token, stepca.SignOptions{
+		PublicKey:     key.SSHPublicKey(),
+		Identity:      cfg.Certificate.Identity,
+		Principals:    cfg.Certificate.Principals,
+		ValidForHours:  validForHours,
+	})
+	if err != nil {
+		return fmt.Errorf("request certificate: %w", err)
+	}
+
+	store := certstore.New(defaultCertStoreDir())
+	if err := store.Save(profile, cert, keyTag); err != nil {
+		return fmt.Errorf("save certificate: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Certificate refreshed successfully\n")
+	return nil
+}
+
+func parseDurationHours(duration string) int {
+	d, err := time.ParseDuration(duration)
+	if err != nil {
+		return 8
+	}
+	return int(d.Hours())
 }
 
 func buildHostKeyCallback(proxy config.SingleProxy) ssh.HostKeyCallback {

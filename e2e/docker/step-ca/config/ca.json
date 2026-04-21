@@ -1,0 +1,131 @@
+{
+	"root": "/home/step/certs/root_ca.crt",
+	"federatedRoots": null,
+	"crt": "/home/step/certs/intermediate_ca.crt",
+	"key": "/home/step/secrets/intermediate_ca_key",
+	"address": ":443",
+	"insecureAddress": "",
+	"dnsNames": [
+		"127.0.0.1"
+	],
+	"ssh": {
+		"hostKey": "/home/step/secrets/ssh_host_ca_key",
+		"userKey": "/home/step/secrets/ssh_user_ca_key"
+	},
+	"logger": {
+		"format": "text"
+	},
+	"db": {
+		"type": "badgerv2",
+		"dataSource": "/home/step/db",
+		"badgerFileLoadingMode": ""
+	},
+	"authority": {
+		"provisioners": [
+			{
+				"type": "JWK",
+				"name": "admin",
+				"key": {
+					"use": "sig",
+					"kty": "EC",
+					"kid": "UYrHI4UXr3KUUuXj7loPeKtjiSXrob6wC-vVz4_C04w",
+					"crv": "P-256",
+					"alg": "ES256",
+					"x": "P3pa8puI5ROGLgFENJTTddBELiDTN-3ZOQPFbhiFHuY",
+					"y": "IU9A2JuNuipmUTHfxxkpUr7LPgSmV6bg-q_mtVJCq40"
+				},
+				"encryptedKey": "eyJhbGciOiJQQkVTMi1IUzI1NitBMTI4S1ciLCJjdHkiOiJqd2sranNvbiIsImVuYyI6IkEyNTZHQ00iLCJwMmMiOjYwMDAwMCwicDJzIjoiQWpGS2VhSFBtUzNhRkFobFI1djFtZyJ9.dEluRtmBepkZmpOzWDxRPoaJBe2kJ3sGw_ycVpPxmMzffJGl7GEaxA.6foxSD7OnODcPfCo.cbsTA7sTh5SVdWm0bWk2jTCY2ghB3UL5-yqlijYQydVzjYgJGFs7EJo3AE4RhdJFwsHzLjlBf5c4_fbv38DfBo6onKkzpMcKH0ouwYMfug1bS1HTd1iu-Hdgu3fK4NH8YD8wDVPjGn_FCnaR7ISl6BWcyEH_tWGaXrfiU13F7ENAON_TRMEXPqXXTM_0ghAy3igdRl-HmtbEwNzCoYiY25REvC2aOQ2K9e7Qf6kNJK1Z-laPxQSF5bTRX8SnOaWP5w_98JeGIKTyy-UWvmaZoTzeQeKQzNPWxCx_wfoJaxD8zxsggGszh9OA91Bm10UzyCim4dB-sN9yyarAspM.nXKdMRUb3S1aDv6tvJ2K4g",
+				"claims": {
+					"enableSSHCA": true
+				}
+			},
+			{
+				"type": "SSHPOP",
+				"name": "sshpop",
+				"claims": {
+					"enableSSHCA": true
+				}
+			},
+			{
+				"type": "OIDC",
+				"name": "oidc-provisioner",
+				"clientID": "ssh-cli",
+				"clientSecret": "secret",
+				"configurationEndpoint": "http://keycloak:8080/realms/ssh/.well-known/openid-configuration",
+				"claims": {
+					"enableSSHCA": true,
+					"disableRenewal": false,
+					"allowRenewalAfterExpiry": false,
+					"disableSmallstepExtensions": false
+				},
+				"options": {
+					"x509": {},
+					"ssh": {}
+				}
+			}
+		]
+	},
+	"tls": {
+		"cipherSuites": [
+			"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+			"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+		],
+		"minVersion": 1.2,
+		"maxVersion": 1.3,
+		"renegotiation": false
+	},
+	"templates": {
+		"ssh": {
+			"user": [
+				{
+					"name": "config.tpl",
+					"type": "snippet",
+					"template": "templates/ssh/config.tpl",
+					"path": "~/.ssh/config",
+					"comment": "#"
+				},
+				{
+					"name": "step_includes.tpl",
+					"type": "prepend-line",
+					"template": "templates/ssh/step_includes.tpl",
+					"path": "${STEPPATH}/ssh/includes",
+					"comment": "#"
+				},
+				{
+					"name": "step_config.tpl",
+					"type": "file",
+					"template": "templates/ssh/step_config.tpl",
+					"path": "ssh/config",
+					"comment": "#"
+				},
+				{
+					"name": "known_hosts.tpl",
+					"type": "file",
+					"template": "templates/ssh/known_hosts.tpl",
+					"path": "ssh/known_hosts",
+					"comment": "#"
+				}
+			],
+			"host": [
+				{
+					"name": "sshd_config.tpl",
+					"type": "snippet",
+					"template": "templates/ssh/sshd_config.tpl",
+					"path": "/etc/ssh/sshd_config",
+					"comment": "#",
+					"requires": [
+						"Certificate",
+						"Key"
+					]
+				},
+				{
+					"name": "ca.tpl",
+					"type": "snippet",
+					"template": "templates/ssh/ca.tpl",
+					"path": "/etc/ssh/ca.pub",
+					"comment": "#"
+				}
+			]
+		}
+	}
+}
