@@ -38,7 +38,9 @@ A cross-platform SSH client (macOS, Linux, Windows) that uses non-exportable pri
 
 ## Overview
 
-ssh-cli provides secure SSH authentication using private keys that never leave the secure hardware:
+ssh-cli provides secure SSH authentication using non-exportable private keys stored in secure hardware (Secure Enclave, macOS Keychain, or YubiKey PIV), integrated with **[step-ca](https://smallstep.com/docs/step-ca/)** for automatic certificate-based SSH access.
+
+Instead of manually deploying SSH public keys to every server, you configure your SSH servers to trust a Certificate Authority (step-ca). ssh-cli obtains a short-lived SSH certificate signed by the CA, and any server trusting that CA will accept the connection — no key distribution needed.
 
 | Key Source | Hardware | Platforms | Key Algorithm |
 |------------|----------|----------|--------------|
@@ -47,12 +49,17 @@ ssh-cli provides secure SSH authentication using private keys that never leave t
 | YubiKey PIV | YubiKey smart card | macOS, Linux, Windows | ECDSA P-256 (via PIV) |
 
 **Key features:**
-- Non-exportable private keys stored in secure hardware
-- Automatic SSH certificate obtain and refresh via step-ca + OIDC
-- SSH agent forwarding backed by non-exportable keys
+- Non-exportable private keys — generated inside secure hardware, never leave the device
+- Automatic SSH certificate enrollment via step-ca + OIDC (Keycloak or any OIDC provider)
+- Certificate auto-refresh on every connection before expiry (configurable threshold)
+- Device authorization grant (RFC 8628) — authenticate via browser without CLI secrets
+- Password grant support for non-interactive automation (`get-cert -username -password`)
+- Read-only SSH agent forwarding backed by non-exportable keys
+- Three certificate modes: step-ca OIDC, local CA signing, and X.509 (self-signed/CSR)
 - Multiple proxy support with failover/round-robin/random balancing
-- Multi-profile configuration
+- Multi-profile configuration (e.g., prod/staging/dev with different keys and CAs)
 - SSH alias resolution from `~/.ssh/config`
+- Double-Ctrl+C safety — forward Ctrl+C to remote session, double-tap to disconnect
 
 ---
 
